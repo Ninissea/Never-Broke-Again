@@ -13,6 +13,7 @@ __pycache__/
 dist
 dist-ssr
 .output
+.netlify
 .vinxi
 .tanstack/**
 .nitro
