@@ -488,6 +488,7 @@ function buildSlices(
   consumed: Record<BudgetCat, number>,
   savingsShort: { target: number; filled: number },
   savingsLong: { target: number; filled: number },
+  available: { total: number; filled: number },
 ): Slice[] {
   const order: BudgetCat[] = ["Nourriture", "Transport", "Loisirs", "Shopping", "Autre"];
   const out: Slice[] = order
@@ -514,7 +515,25 @@ function buildSlices(
       filled: Math.min(savingsLong.target, Math.max(0, savingsLong.filled)),
     });
   }
+  if (available.total > 0.5) {
+    out.push({
+      label: "Disponible",
+      color: "#2dd4bf",
+      total: available.total,
+      filled: available.filled,
+    });
+  }
   return out;
+}
+
+// Part de l'épargne du mois qui dépasse les cibles court/long terme : c'est de l'argent
+// épargné mais non affecté à un objectif, donc encore "disponible".
+function availableSlice(
+  saved: number,
+  split: { short: number; long: number },
+): { total: number; filled: number } {
+  const leftover = Math.max(0, saved - Math.max(0, split.short) - Math.max(0, split.long));
+  return { total: leftover, filled: leftover };
 }
 
 // Objectif d'épargne mensuel dérivé des objectifs de l'utilisateur (somme sur tous les objectifs
@@ -1648,6 +1667,7 @@ function BudgetPie({
     consumed,
     { target: shortTarget, filled: split.short },
     { target: longTarget, filled: split.long },
+    availableSlice(data.currentMonthSaved, split),
   );
   const totalBudget = slices.reduce((s, x) => s + x.total, 0);
   const totalConsumed = slices.reduce((s, x) => s + Math.min(x.total, x.filled), 0);
@@ -1685,7 +1705,9 @@ function BudgetPie({
                   <span className="size-3.5 rounded-sm" style={{ background: s.color }} />
                   <span className="flex-1">{s.label}</span>
                   <span className="font-mono text-xs text-white/70">
-                    {Math.round(s.filled)}/{Math.round(s.total)}€
+                    {s.label === "Disponible"
+                      ? `${Math.round(s.filled)}€`
+                      : `${Math.round(s.filled)}/${Math.round(s.total)}€`}
                   </span>
                 </div>
                 <div className="ml-6 mt-1 h-1 rounded-full bg-white/10 overflow-hidden">
@@ -2314,10 +2336,13 @@ function MonthStatRow({
     m.cats,
     { target: shortTarget, filled: split.short },
     { target: longTarget, filled: split.long },
+    availableSlice(m.saved, split),
   );
   const totalRef = slices.reduce((s, x) => s + x.total, 0);
   const totalSpent = slices
-    .filter((s) => s.label !== "Épargne courte" && s.label !== "Épargne longue")
+    .filter(
+      (s) => s.label !== "Épargne courte" && s.label !== "Épargne longue" && s.label !== "Disponible",
+    )
     .reduce((s, x) => s + x.filled, 0);
 
   return (
