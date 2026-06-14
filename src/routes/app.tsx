@@ -218,6 +218,8 @@ type Computed = {
   monthlyDisposable: number;
   currentMonth: Record<BudgetCat, number>;
   currentMonthSaved: number;
+  currentMonthIncome: number;
+  currentMonthExpense: number;
   currentMonthDay: number;
   currentMonthDays: number;
   months: MonthRow[];
@@ -303,12 +305,11 @@ function compute(
   const expense = txs.filter((t) => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
   const recent = [...txs].sort((a, b) => b.date.getTime() - a.date.getTime()).slice(0, 30);
 
-  // Le budget mensuel (mois, baseline, catégories) exclut les charges fixes mensuelles
-  // (loyer, abonnements, assurances...) : elles ne sont pas pilotables au jour le jour.
-  const budgetTxs = txs.filter((t) => !fixedChargeLabels.has(normalizeLabel(t.label)));
-
+  // Les totaux mensuels (revenus/dépenses/épargné) portent sur TOUTES les transactions du
+  // mois (charges fixes comprises) pour refléter le vrai solde ; seules les catégories du
+  // budget piloté (`cats`, utilisées par le camembert) excluent les charges fixes.
   const byMonth = new Map<string, Transaction[]>();
-  for (const t of budgetTxs) {
+  for (const t of txs) {
     const k = monthKey(t.date);
     if (!byMonth.has(k)) byMonth.set(k, []);
     byMonth.get(k)!.push(t);
@@ -321,6 +322,7 @@ function compute(
     const exp = arr.filter((t) => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
     const cats = emptyCats();
     for (const t of arr) {
+      if (fixedChargeLabels.has(normalizeLabel(t.label))) continue;
       const c = mapToBudgetCat(t);
       if (c) cats[c] += Math.abs(t.amount);
     }
@@ -338,6 +340,7 @@ function compute(
   const pastKeys = sortedKeys.slice(0, -1);
   for (const k of pastKeys) {
     for (const t of byMonth.get(k)!) {
+      if (fixedChargeLabels.has(normalizeLabel(t.label))) continue;
       const c = mapToBudgetCat(t);
       if (!c) continue;
       baseline[c] += Math.abs(t.amount);
@@ -348,9 +351,14 @@ function compute(
 
   const currentMonth = emptyCats();
   let currentMonthSaved = 0;
+  let currentMonthIncome = 0;
+  let currentMonthExpense = 0;
   if (months.length > 0) {
-    Object.assign(currentMonth, months[months.length - 1].cats);
-    currentMonthSaved = months[months.length - 1].saved;
+    const last = months[months.length - 1];
+    Object.assign(currentMonth, last.cats);
+    currentMonthSaved = last.saved;
+    currentMonthIncome = last.income;
+    currentMonthExpense = last.spent;
   }
   if (pastKeys.length === 0) Object.assign(baseline, currentMonth);
 
@@ -370,8 +378,8 @@ function compute(
   // la date du jour) : on simule comme si "aujourd'hui" était ce dernier jour connu.
   let currentMonthDay = 1;
   let currentMonthDays = 30;
-  if (budgetTxs.length > 0) {
-    const maxDate = budgetTxs.reduce((max, t) => (t.date > max ? t.date : max), budgetTxs[0].date);
+  if (txs.length > 0) {
+    const maxDate = txs.reduce((max, t) => (t.date > max ? t.date : max), txs[0].date);
     currentMonthDay = maxDate.getDate();
     currentMonthDays = daysInMonth(maxDate.getFullYear(), maxDate.getMonth());
   }
@@ -400,6 +408,8 @@ function compute(
     monthlyDisposable,
     currentMonth,
     currentMonthSaved,
+    currentMonthIncome,
+    currentMonthExpense,
     currentMonthDay,
     currentMonthDays,
     months,
@@ -1482,8 +1492,9 @@ function EpargneTab({
   onApplyInsight: () => void;
   streak: number;
 }) {
-  // Solde "Dépenses courantes" calculé uniquement à partir du relevé du mois actuel.
-  const courant = Math.round(currentData.income - currentData.expense);
+  // Solde "Dépenses courantes" calculé uniquement à partir du mois le plus récent du relevé
+  // du mois actuel (revenus - dépenses, charges fixes comprises).
+  const courant = Math.round(currentData.currentMonthSaved);
   const shortSaved = shortGoals.reduce((s, g) => s + g.saved, 0);
   const longSaved = longGoals.reduce((s, g) => s + g.saved, 0);
   const shortPinned = pinnedOrFirst(shortGoals);
@@ -1809,7 +1820,9 @@ function WalletPage({
 }
 
 function CurrentWalletDetail({ data }: { data: Computed }) {
-  const courant = Math.round(data.income - data.expense);
+  // `data` est ici le calcul dédié au seul relevé du mois actuel : on isole le mois le plus
+  // récent (revenus - dépenses, charges fixes comprises) pour le solde "Dépenses courantes".
+  const courant = Math.round(data.currentMonthSaved);
   return (
     <div
       className="glass-strong rounded-[28px] p-6 sm:p-8 space-y-5"
@@ -1827,29 +1840,25 @@ function CurrentWalletDetail({ data }: { data: Computed }) {
       >
         {fmt(courant)}
       </div>
-      {data.months.length > 1 && (
-        <p className="text-xs text-white/55">
-          Ces chiffres représentent {data.months.length} mois de relevés importés.
-        </p>
-      )}
       <div className="grid grid-cols-2 gap-3 text-sm">
         <div className="glass rounded-2xl p-4">
           <div className="text-white/60 text-xs">Revenus</div>
           <div className="font-mono font-bold text-lg text-[var(--ember-glow)]">
-            +{Math.round(data.income)}€
+            +{Math.round(data.currentMonthIncome)}€
           </div>
         </div>
         <div className="glass rounded-2xl p-4">
           <div className="text-white/60 text-xs">Dépenses</div>
           <div className="font-mono font-bold text-lg text-destructive">
-            −{Math.round(data.expense)}€
+            −{Math.round(data.currentMonthExpense)}€
           </div>
         </div>
       </div>
       <p className="text-sm text-white/70">
-        Ce portefeuille reflète ce qu'il te reste après tes dépenses (hors loyer et charges fixes,
-        déjà déduites de ton budget mensuel). Il peut devenir négatif si tes dépenses dépassent tes
-        revenus. Il sert de base à tes virements automatiques vers tes deux portefeuilles d'épargne.
+        Ce portefeuille reflète ce qu'il te reste ce mois-ci une fois toutes tes dépenses
+        passées (loyer et charges fixes compris). Il peut devenir négatif si tes dépenses
+        dépassent tes revenus. Il sert de base à tes virements automatiques vers tes deux
+        portefeuilles d'épargne.
       </p>
     </div>
   );
