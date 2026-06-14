@@ -225,10 +225,41 @@ def build_transactions(df: pd.DataFrame) -> list[dict]:
     return transactions
 
 
+OLLAMA_MODEL = "llama3.2:3b"
+# Garde le modèle chargé en mémoire entre deux requêtes : sur CPU, le rechargement
+# du modèle est souvent le principal poste de latence.
+OLLAMA_KEEP_ALIVE = "30m"
+# Les réponses (titre/message/montant) sont courtes, mais le JSON inclut aussi les clés/
+# structure du schéma : une valeur trop basse tronque le JSON avant la fin (réponse
+# imparfaite -> fallback générique, donc coût LLM payé pour rien). 400 laisse de la marge.
+OLLAMA_NUM_PREDICT = 400
+
+# Cache mémoire des réponses LLM : avec temperature=0 et seed fixe, une même entrée
+# produit toujours la même sortie, donc pas besoin de re-solliciter le modèle.
+_LLM_CACHE: dict[str, dict] = {}
+
+
+def _make_llm():
+    from langchain_community.chat_models import ChatOllama
+
+    # temperature=0 (et seed fixe) pour des réponses reproductibles à entrée identique.
+    return ChatOllama(
+        model=OLLAMA_MODEL,
+        temperature=0,
+        seed=42,
+        format="json",
+        num_predict=OLLAMA_NUM_PREDICT,
+        keep_alive=OLLAMA_KEEP_ALIVE,
+    )
+
+
 def _invoke_insight_chain(pydantic_model: type[BaseModel], template: str, input_variables: list[str], inputs: dict, fallback: dict) -> dict:
     """Construit et exécute une chaîne LangChain -> Ollama -> parser, avec anti-crash."""
+    cache_key = json.dumps({"t": template, "i": inputs}, sort_keys=True, ensure_ascii=False)
+    if cache_key in _LLM_CACHE:
+        return _LLM_CACHE[cache_key]
+
     try:
-        from langchain_community.chat_models import ChatOllama
         from langchain_core.output_parsers import PydanticOutputParser
         from langchain_core.prompts import PromptTemplate
 
@@ -238,9 +269,7 @@ def _invoke_insight_chain(pydantic_model: type[BaseModel], template: str, input_
             input_variables=input_variables,
             partial_variables={"format_instructions": parser.get_format_instructions()},
         )
-        # temperature=0 (et seed fixe) pour des réponses reproductibles à entrée identique.
-        llm = ChatOllama(model="llama3.2:3b", temperature=0, seed=42, format="json")
-        chain = prompt | llm | parser
+        chain = prompt | _make_llm() | parser
 
         result = chain.invoke(inputs)
         data = result.model_dump()
@@ -248,6 +277,7 @@ def _invoke_insight_chain(pydantic_model: type[BaseModel], template: str, input_
             data["titre"] = html.unescape(data["titre"])
         if "message" in data:
             data["message"] = html.unescape(data["message"])
+        _LLM_CACHE[cache_key] = data
         return data
     except Exception:
         return fallback
@@ -334,6 +364,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def warm_up_llm():
+    """Charge le modèle Ollama en mémoire au démarrage du backend, pour que la
+    première vraie requête ne paie pas le coût de chargement (gros sur CPU)."""
+    try:
+        _make_llm().invoke("Réponds uniquement: ok")
+    except Exception:
+        pass
 
 
 @app.get("/api/insight")
