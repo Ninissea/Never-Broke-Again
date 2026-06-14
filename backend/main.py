@@ -23,11 +23,11 @@ CATEGORY_COLORS = {
 }
 
 FALLBACK_PAYLOAD = {
-    "user": {"name": "Anisse", "streak": 14},
+    "user": {"name": "Utilisateur", "streak": 14},
     "pots": [
         {"id": "courant", "nom": "COURANT", "sousTitre": "Compte courant", "solde": 850, "objectif": 1000},
         {"id": "epargne_courte", "nom": "EPARGNE COURTE", "sousTitre": "Fonds d'urgence", "solde": 30, "objectif": 500},
-        {"id": "epargne_longue", "nom": "EPARGNE LONGUE", "sousTitre": "Cotisation WEI", "solde": 2500, "objectif": 5000},
+        {"id": "epargne_longue", "nom": "EPARGNE LONGUE", "sousTitre": "Objectif long terme", "solde": 2500, "objectif": 5000},
     ],
     "budget": [
         {"categorie": "Loyer", "montant": 200, "couleur": "#B91C1C"},
@@ -42,8 +42,8 @@ FALLBACK_PAYLOAD = {
         {"libelle": "CAFETARIA", "montant": -0.55, "couleur": "#F59E0B"},
     ],
     "insight": {
-        "titre": "Sécurise ton WEI",
-        "message": "Les flux de la colocation sont stables. Transfère 15 € vers le pot 'Cotisation WEI 2026' pour sécuriser l'événement et maintenir ton streak.",
+        "titre": "Sécurise ton épargne",
+        "message": "Tes flux sont stables ce mois-ci. Transfère 15 € vers ton pot d'épargne long terme pour avancer vers ton objectif et maintenir ton streak.",
         "montant": 15,
         "potSource": "courant",
         "potCible": "epargne_longue",
@@ -68,7 +68,7 @@ class TransactionIn(BaseModel):
 class InsightRequest(BaseModel):
     balance: float
     transactions: list[TransactionIn]
-    pot_cible: str = "Cotisation WEI 2026"
+    pot_cible: str = "Épargne"
     self_def: str | None = None
     name: str | None = None
     situation: str | None = None
@@ -103,28 +103,32 @@ class FixedChargesResponse(BaseModel):
     charges: list[FixedCharge] = Field(description="Liste des charges fixes mensuelles détectées")
 
 
-LIVE_FALLBACK = {
-    "titre": "Petit écart, grande discipline",
-    "message": (
-        "Cette dépense fast-food de 15€ peut être compensée immédiatement. "
-        "Transfère 15€ vers ton pot 'Cotisation WEI 2026' pour rester sur la trajectoire "
-        "et garder ton streak intact."
-    ),
-    "montant": 15,
-    "potCible": "Cotisation WEI 2026",
-}
-
 LOW_BALANCE_THRESHOLD = 20
 
-LIVE_FALLBACK_LOW_BALANCE = {
-    "titre": "Stop, on freine un peu",
-    "message": (
-        "Ton solde est très bas en ce moment. Mets en pause les dépenses non essentielles "
-        "(fast-food, sorties) le temps de laisser ton compte respirer avant de penser à épargner."
-    ),
-    "montant": 0,
-    "potCible": "Cotisation WEI 2026",
-}
+
+def _live_fallback(pot_cible: str) -> dict:
+    return {
+        "titre": "Petit écart, grande discipline",
+        "message": (
+            "Cette dépense fast-food de 15€ peut être compensée immédiatement. "
+            f"Transfère 15€ vers ton pot '{pot_cible}' pour rester sur la trajectoire "
+            "et garder ton streak intact."
+        ),
+        "montant": 15,
+        "potCible": pot_cible,
+    }
+
+
+def _live_fallback_low_balance(pot_cible: str) -> dict:
+    return {
+        "titre": "Stop, on freine un peu",
+        "message": (
+            "Ton solde est très bas en ce moment. Mets en pause les dépenses non essentielles "
+            "(fast-food, sorties) le temps de laisser ton compte respirer avant de penser à épargner."
+        ),
+        "montant": 0,
+        "potCible": pot_cible,
+    }
 
 
 FIXED_CHARGE_KEYWORDS = (
@@ -192,7 +196,7 @@ def categorize(libelle: str, montant: float) -> str:
         return "Loisirs"
     if any(k in l for k in ("FONDS URGENCE", "EPARGNE COURTE")):
         return "Epargne Court Terme"
-    if any(k in l for k in ("POT WEI", "EPARGNE LONGUE")):
+    if any(k in l for k in ("EPARGNE LONGUE", "EPARGNE LONG TERME")):
         return "Epargne Long Terme"
     return "Autre"
 
@@ -306,43 +310,70 @@ DEFAULT_SITUATION = "qui gère son budget personnel"
 def _profile_context(name: str | None, situation: str | None) -> tuple[str, str]:
     """Retourne (nom, situation) avec des valeurs par défaut génériques, pour que les
     prompts s'adaptent au profil de chaque utilisateur au lieu de viser une personne
-    et une situation de vie fixées en dur (ex: "Anisse, étudiant en colocation à
-    Lille")."""
+    et une situation de vie fixées en dur."""
     final_name = name.strip() if name and name.strip() else "l'utilisateur"
     final_situation = situation.strip() if situation and situation.strip() else DEFAULT_SITUATION
     return final_name, final_situation
+
+
+def _pick_pot(pots: list[dict], keywords: tuple[str, ...], default_id: str, default_nom: str) -> tuple[str, str]:
+    """Choisit un pot par mot-clé (ex: pot d'épargne long terme, pot courant) parmi les
+    pots de l'utilisateur, par ordre de priorité des mots-clés, pour ne pas viser un
+    id/nom de pot fixé en dur."""
+    for keyword in keywords:
+        for pot in pots:
+            haystack = f"{pot.get('id', '')} {pot.get('nom', '')} {pot.get('sousTitre', '')}".upper()
+            if keyword in haystack:
+                return pot.get("id", default_id), pot.get("nom", default_nom)
+    if pots:
+        return pots[-1].get("id", default_id), pots[-1].get("nom", default_nom)
+    return default_id, default_nom
 
 
 def generate_insight(budget: list[dict], pots_data: dict, transactions: list[dict]) -> dict:
     name, situation = _profile_context(
         pots_data.get("user", {}).get("name"), pots_data.get("user", {}).get("situation")
     )
+    pots = pots_data.get("pots", [])
+    target_id, target_nom = _pick_pot(pots, ("LONG", "EPARGNE"), "epargne_longue", "Épargne")
+    source_id, source_nom = _pick_pot(pots, ("COURANT",), "courant", "Compte courant")
     template = (
         "Tu es un conseiller financier pour {name}, {situation}.\n"
         "Budget mensuel par catégorie (en euros, dépenses) : {budget}\n"
         "État des pots d'épargne : {pots}\n"
         "Dernières transactions : {transactions}\n\n"
         "Donne UN SEUL conseil d'épargne actionnable, orienté vers la sécurisation "
-        "du pot 'Cotisation WEI 2026' (id potCible: epargne_longue), en débitant le "
-        "pot courant (id potSource: courant), SANS toucher aux dépenses vitales "
+        "du pot '{target_nom}' (id potCible: {target_id}), en débitant le "
+        "pot '{source_nom}' (id potSource: {source_id}), SANS toucher aux dépenses vitales "
         "(Loyer, Nourriture, Transport).\n"
         "Ce conseil doit être CHIFFRÉ avec un montant précis en euros : une réponse vague "
         'comme "dépense moins" ou "fais attention à tes dépenses" est INTERDITE.\n\n'
         "Réponds UNIQUEMENT avec un objet JSON de cette forme exacte, sans aucun texte "
         "avant ou après, sans raisonnement, sans bloc de code markdown "
         "(remplace les valeurs par ton conseil) :\n"
-        '{{"titre": "Sécurise ton WEI", "message": "Transfère 15€ vers ton pot Cotisation '
-        'WEI 2026 pour avancer sans toucher au budget vital.", "montant": 15, '
-        '"potSource": "courant", "potCible": "epargne_longue"}}'
+        '{{"titre": "Sécurise ton épargne", "message": "Transfère 15€ vers ton pot {target_nom} '
+        'pour avancer sans toucher au budget vital.", "montant": 15, '
+        '"potSource": "{source_id}", "potCible": "{target_id}"}}'
     )
     inputs = {
         "name": name,
         "situation": situation,
         "budget": json.dumps(budget, ensure_ascii=False),
-        "pots": json.dumps(pots_data.get("pots", []), ensure_ascii=False),
+        "pots": json.dumps(pots, ensure_ascii=False),
         "transactions": json.dumps(transactions, ensure_ascii=False),
+        "target_nom": target_nom,
+        "target_id": target_id,
+        "source_nom": source_nom,
+        "source_id": source_id,
     }
-    return _invoke_insight_chain(InsightModel, template, ["name", "situation", "budget", "pots", "transactions"], inputs, FALLBACK_PAYLOAD["insight"])
+    fallback = {**FALLBACK_PAYLOAD["insight"], "potSource": source_id, "potCible": target_id}
+    return _invoke_insight_chain(
+        InsightModel,
+        template,
+        ["name", "situation", "budget", "pots", "transactions", "target_nom", "target_id", "source_nom", "source_id"],
+        inputs,
+        fallback,
+    )
 
 
 def _self_def_profile(self_def: str | None, name: str) -> str:
@@ -391,7 +422,7 @@ def generate_live_insight(
     template = (
         "Tu es un conseiller financier pour {name}, {situation}.\n"
         "Solde actuel du compte courant : {balance} €\n"
-        "Dernières transactions (libellé, montant en euros, date) : {transactions}\n"
+        "Transactions des 30 derniers jours (libellé, montant en euros, date) : {transactions}\n"
         "Pot d'épargne cible : '{pot_cible}'\n"
         "Style d'épargne de {name} : {profile}\n\n"
         "Règles à respecter impérativement :\n"
@@ -420,13 +451,13 @@ def generate_live_insight(
         "profile": _self_def_profile(self_def, profile_name),
         "rules": rules_text,
     }
-    fallback = LIVE_FALLBACK_LOW_BALANCE if balance < LOW_BALANCE_THRESHOLD else {**LIVE_FALLBACK, "potCible": pot_cible}
+    fallback = _live_fallback_low_balance(pot_cible) if balance < LOW_BALANCE_THRESHOLD else _live_fallback(pot_cible)
     result = _invoke_insight_chain(InsightResponse, template, ["name", "situation", "balance", "transactions", "pot_cible", "profile", "rules"], inputs, fallback)
 
     # Le LLM (llama3.2:3b) ne respecte pas toujours la consigne "pas de transfert si solde bas" :
     # on applique un garde-fou strict en post-traitement plutôt que de lui faire confiance.
     if balance < LOW_BALANCE_THRESHOLD:
-        return {**LIVE_FALLBACK_LOW_BALANCE, "potCible": pot_cible}
+        return _live_fallback_low_balance(pot_cible)
 
     # Le montant proposé ne doit jamais dépasser ce qu'il reste après le transfert.
     montant = max(0.0, min(float(result.get("montant", 0)), balance - LOW_BALANCE_THRESHOLD))

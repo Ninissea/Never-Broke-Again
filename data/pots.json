@@ -1,8 +1,0 @@
-{
-  "user": { "name": "Anisse", "streak": 14 },
-  "pots": [
-    { "id": "courant",        "nom": "COURANT",         "sousTitre": "Compte courant",  "solde": 850,  "objectif": 1000 },
-    { "id": "epargne_courte", "nom": "EPARGNE COURTE",  "sousTitre": "Fonds d'urgence", "solde": 30,   "objectif": 500  },
-    { "id": "epargne_longue", "nom": "EPARGNE LONGUE",  "sousTitre": "Cotisation WEI",  "solde": 2500, "objectif": 5000 }
-  ]
-}

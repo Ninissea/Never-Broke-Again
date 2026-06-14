@@ -355,7 +355,7 @@ function BetaCsv() {
               Ouvrir l'app
             </Link>
             <div className="mt-6 grid grid-cols-3 gap-3 w-full max-w-sm">
-              {["Coloc Lille", "CLP Tech", "BDE WEI"].map((c) => (
+              {["Compte courant", "Épargne", "Projets"].map((c) => (
                 <div
                   key={c}
                   className="glass rounded-xl py-2 text-[11px] font-medium text-muted-foreground"
@@ -425,7 +425,7 @@ function OpenBanking() {
     {
       n: "PIS",
       t: "Exécution en un clic",
-      d: '"Transfère 15 € vers ton Pot WEI" — biométrie SCA, c\'est parti.',
+      d: '"Transfère 15 € vers ton pot Épargne" — biométrie SCA, c\'est parti.',
     },
     {
       n: "B2B2C",

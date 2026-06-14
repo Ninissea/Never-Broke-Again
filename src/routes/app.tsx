@@ -210,6 +210,7 @@ type Computed = {
   expense: number;
   monthlyIncome: number;
   recent: Transaction[];
+  last30Days: Transaction[];
   baseline: Record<BudgetCat, number>;
   monthlyBudget: Record<BudgetCat, number>;
   monthlyDisposable: number;
@@ -298,6 +299,17 @@ function compute(
   const expense = txs.filter((t) => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
   const recent = [...txs].sort((a, b) => b.date.getTime() - a.date.getTime()).slice(0, 30);
 
+  // Transactions des 30 derniers jours (par rapport à la plus récente du relevé, pas la
+  // date système) : utilisées pour le conseil du LLM, qui doit réagir à l'activité
+  // réelle récente du compte plutôt qu'à un nombre fixe d'opérations.
+  const last30Days = (() => {
+    if (recent.length === 0) return recent;
+    const today = recent[0].date;
+    const cutoff = new Date(today);
+    cutoff.setDate(cutoff.getDate() - 30);
+    return recent.filter((t) => t.date >= cutoff);
+  })();
+
   // Le budget mensuel (mois, baseline, catégories) exclut les charges fixes mensuelles
   // (loyer, abonnements, assurances...) : elles ne sont pas pilotables au jour le jour.
   const budgetTxs = txs.filter((t) => !fixedChargeLabels.has(normalizeLabel(t.label)));
@@ -383,6 +395,7 @@ function compute(
     expense,
     monthlyIncome,
     recent,
+    last30Days,
     baseline,
     monthlyBudget,
     monthlyDisposable,
@@ -732,7 +745,7 @@ function AppDashboard() {
     setInsightApplied(true);
   }, [insight, insightApplied, shortGoals, setShortGoals]);
 
-  // À la fin de l'onboarding : envoie le profil + l'agrégat des 6 derniers mois au conseiller IA local.
+  // À la fin de l'onboarding : envoie le profil + les transactions des 30 derniers jours au conseiller IA local.
   const handleProfileContinue = useCallback(
     async (choice: SelfDef) => {
       setSelfDef(choice);
@@ -740,8 +753,8 @@ function AppDashboard() {
       if (!txs) return;
       const d = compute(txs);
       const balance = Math.max(0, Math.round(d.income - d.expense));
-      const potCible = pinnedOrFirst(shortGoals)?.name || "Cotisation WEI 2026";
-      const recent = d.recent.map((t) => ({
+      const potCible = pinnedOrFirst(shortGoals)?.name || "Épargne";
+      const recent = d.last30Days.map((t) => ({
         label: t.label,
         amount: t.amount,
         date: t.date.toISOString().slice(0, 10),
@@ -771,8 +784,8 @@ function AppDashboard() {
 
     const updatedData = compute(updated);
     const balance = Math.max(0, Math.round(updatedData.income - updatedData.expense));
-    const potCible = pinnedOrFirst(shortGoals)?.name || "Cotisation WEI 2026";
-    const recent = updatedData.recent.map((t) => ({
+    const potCible = pinnedOrFirst(shortGoals)?.name || "Épargne";
+    const recent = updatedData.last30Days.map((t) => ({
       label: t.label,
       amount: t.amount,
       date: t.date.toISOString().slice(0, 10),
@@ -2563,7 +2576,7 @@ function ProfileIntro({
         <img
           src={PROFILE_IMAGE[detected]}
           alt=""
-          className="size-24 object-contain mx-auto mb-4 animate-float"
+          className="size-48 object-contain mx-auto mb-4 animate-float"
         />
         <div className="text-[10px] uppercase tracking-[0.2em] text-white/60">Profil détecté</div>
         <h1 className="font-display text-xl sm:text-2xl font-semibold mt-2 text-white">
@@ -2677,7 +2690,7 @@ function CompteTab({
           <User className="size-3.5" /> Mon profil
         </div>
         <div className="flex items-center gap-3 mt-2">
-          <img src={PROFILE_IMAGE[detected]} alt="" className="size-24 object-contain" />
+          <img src={PROFILE_IMAGE[detected]} alt="" className="size-48 object-contain" />
           <h2 className="font-display text-lg font-semibold text-white">
             {PROFILE_LABEL[detected]}
           </h2>
@@ -2704,7 +2717,7 @@ function CompteTab({
             type="text"
             value={profileName}
             onChange={(e) => setProfileName(e.target.value)}
-            placeholder="Ex: Anisse"
+            placeholder="Ex: Camille"
             className="w-full rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/30"
           />
         </div>
@@ -2716,7 +2729,7 @@ function CompteTab({
             id="profile-situation"
             value={profileSituation}
             onChange={(e) => setProfileSituation(e.target.value)}
-            placeholder="Ex: étudiant en colocation à 5 à Lille, budget serré avec des dépenses partagées"
+            placeholder="Ex: en colocation, budget serré avec des dépenses partagées"
             rows={2}
             className="w-full rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/30 resize-none"
           />

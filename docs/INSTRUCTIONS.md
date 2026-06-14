@@ -45,11 +45,11 @@ La maquette `maquette.png` sert **UNIQUEMENT de référence pour la DISPOSITION*
 ### Structure exacte reçue (le front s'adapte à ces clés) :
 ```json
 {
-  "user": { "name": "Anisse", "streak": 14 },
+  "user": { "name": "Utilisateur", "streak": 14 },
   "pots": [
     { "id": "courant", "nom": "COURANT", "sousTitre": "Compte courant", "solde": 850, "objectif": 1000 },
     { "id": "epargne_courte", "nom": "EPARGNE COURTE", "sousTitre": "Fonds d'urgence", "solde": 30, "objectif": 500 },
-    { "id": "epargne_longue", "nom": "EPARGNE LONGUE", "sousTitre": "Cotisation WEI", "solde": 2500, "objectif": 5000 }
+    { "id": "epargne_longue", "nom": "EPARGNE LONGUE", "sousTitre": "Objectif long terme", "solde": 2500, "objectif": 5000 }
   ],
   "budget": [
     { "categorie": "Loyer", "montant": 200, "couleur": "#B91C1C" },
@@ -64,8 +64,8 @@ La maquette `maquette.png` sert **UNIQUEMENT de référence pour la DISPOSITION*
     { "libelle": "CAFETARIA", "montant": -0.55, "couleur": "#F59E0B" }
   ],
   "insight": {
-    "titre": "Sécurise ton WEI",
-    "message": "Les flux de la colocation sont stables. Transfère 15 € vers le pot 'Cotisation WEI 2026' pour sécuriser l'événement et maintenir ton streak.",
+    "titre": "Sécurise ton épargne",
+    "message": "Tes flux sont stables ce mois-ci. Transfère 15 € vers ton pot d'épargne long terme pour avancer vers ton objectif et maintenir ton streak.",
     "montant": 15, "potSource": "courant", "potCible": "epargne_longue"
   }
 }
@@ -95,7 +95,7 @@ Header + bottom nav partagés sur toutes les pages (layout commun).
 # 4. PAGE ACCUEIL (ÉPARGNE)
 
 ## 4.1 Header — depuis `user`
-- "Salut, {user.name} !" (→ "Salut, Anisse !")
+- "Salut, {user.name} !" (→ "Salut, Camille !")
 - Streak mis en valeur : `🔥 {user.streak} Jours`.
 
 ## 4.2 Calendrier hebdomadaire
@@ -138,7 +138,7 @@ Zone bordure dorée : une ligne par transaction (pastille `couleur` + `libelle` 
 # 9. CONTENU DES 3 AUTRES PAGES (même DA, header + nav partagés)
 - **STATISTIQUES** : titre + 2-3 cartes de stats (ex "Économisé ce mois : 80 €", "Respect du budget : 92 %") + une barre de progression.
 - **FORMATION** : titre + 3-4 modules en cartes dorées cliquables ("Gérer son budget", "Comprendre l'épargne", "Initiation à l'investissement").
-- **COMPTE** : titre + nom "Anisse" + réglages fictifs (Profil, Sécurité, Déconnexion).
+- **COMPTE** : titre + nom de l'utilisateur + réglages fictifs (Profil, Sécurité, Déconnexion).
 
 ---
 

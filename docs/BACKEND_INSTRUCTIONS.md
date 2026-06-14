@@ -36,7 +36,7 @@ Contient `user` (`name`, `streak`) et la liste `pots` (`id`, `nom`, `sousTitre`,
    - `ILEVIA`, `SNCF`, `UBER` (sans EATS) → **Transport**
    - `SPOTIFY`, `CINEMA`, `STEAM`, `NETFLIX` → **Loisirs**
    - `FONDS URGENCE`, `EPARGNE COURTE` → **Epargne Court Terme**
-   - `POT WEI`, `EPARGNE LONGUE` → **Epargne Long Terme**
+   - `EPARGNE LONGUE`, `EPARGNE LONG TERME` → **Epargne Long Terme**
    - revenus (montant > 0) → **Revenus** (exclus du camembert budget)
    - reste → **Autre**
 3. **Agrégation** :
@@ -50,7 +50,7 @@ Contient `user` (`name`, `streak`) et la liste `pots` (`id`, `nom`, `sousTitre`,
 
 # 3. INFÉRENCE IA (LangChain + Ollama)
 
-- Utilise un **Prompt Template métier** strict : injecte le budget agrégé, l'état des pots et les dernières transactions, et demande UN conseil d'épargne actionnable orienté "sécuriser le WEI 2026 sans toucher aux dépenses vitales".
+- Utilise un **Prompt Template métier** strict : injecte le budget agrégé, l'état des pots et les dernières transactions, et demande UN conseil d'épargne actionnable orienté "sécuriser le pot d'épargne long terme sans toucher aux dépenses vitales".
 - Force une sortie JSON propre via **`StructuredOutputParser`** (ou `PydanticOutputParser`) avec exactement ces champs :
   - `titre` (string court)
   - `message` (string, le conseil)
@@ -67,11 +67,11 @@ Le front consomme exactement cette structure. Ne change pas les noms de clés.
 
 ```json
 {
-  "user": { "name": "Anisse", "streak": 14 },
+  "user": { "name": "Utilisateur", "streak": 14 },
   "pots": [
     { "id": "courant", "nom": "COURANT", "sousTitre": "Compte courant", "solde": 850, "objectif": 1000 },
     { "id": "epargne_courte", "nom": "EPARGNE COURTE", "sousTitre": "Fonds d'urgence", "solde": 30, "objectif": 500 },
-    { "id": "epargne_longue", "nom": "EPARGNE LONGUE", "sousTitre": "Cotisation WEI", "solde": 2500, "objectif": 5000 }
+    { "id": "epargne_longue", "nom": "EPARGNE LONGUE", "sousTitre": "Objectif long terme", "solde": 2500, "objectif": 5000 }
   ],
   "budget": [
     { "categorie": "Loyer",              "montant": 200, "couleur": "#B91C1C" },
@@ -86,8 +86,8 @@ Le front consomme exactement cette structure. Ne change pas les noms de clés.
     { "libelle": "CAFETARIA", "montant": -0.55,  "couleur": "#F59E0B" }
   ],
   "insight": {
-    "titre": "Sécurise ton WEI",
-    "message": "Les flux de la colocation sont stables. Transfère 15 € vers le pot 'Cotisation WEI 2026' pour sécuriser l'événement et maintenir ton streak.",
+    "titre": "Sécurise ton épargne",
+    "message": "Tes flux sont stables ce mois-ci. Transfère 15 € vers ton pot d'épargne long terme pour avancer vers ton objectif et maintenir ton streak.",
     "montant": 15,
     "potSource": "courant",
     "potCible": "epargne_longue"
