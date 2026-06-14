@@ -86,6 +86,8 @@ const LS_KEYS = {
   shortGoals: "nba.shortGoals",
   longGoals: "nba.longGoals",
   selfDef: "nba.selfDef",
+  profileName: "nba.profileName",
+  profileSituation: "nba.profileSituation",
 };
 
 const PROFILE_LABEL: Record<SpenderProfile, string> = {
@@ -535,6 +537,10 @@ function AppDashboard() {
   const [walletOpen, setWalletOpen] = useState<null | "courant" | "court" | "long">(null);
   const [introDone, setIntroDone] = useState(false);
   const [selfDef, setSelfDef] = useLS<SelfDef | null>(LS_KEYS.selfDef, null);
+  // Profil libre (nom + situation) envoyé au conseiller IA pour personnaliser ses conseils,
+  // au lieu de viser une personne et une situation fixées en dur.
+  const [profileName, setProfileName] = useLS<string>(LS_KEYS.profileName, "");
+  const [profileSituation, setProfileSituation] = useLS<string>(LS_KEYS.profileSituation, "");
   const [shortGoals, setShortGoals] = useGoalsLS(LS_KEYS.shortGoals);
   const [longGoals, setLongGoals] = useGoalsLS(LS_KEYS.longGoals);
   const [insight, setInsight] = useState<InsightData | null>(null);
@@ -649,6 +655,8 @@ function AppDashboard() {
             transactions: recent,
             pot_cible: potCible,
             self_def: profile,
+            name: profileName || null,
+            situation: profileSituation || null,
           }),
         });
         if (!res.ok) throw new Error("Réponse invalide");
@@ -676,7 +684,7 @@ function AppDashboard() {
         setInsightLoading(false);
       }
     },
-    [],
+    [profileName, profileSituation],
   );
 
   // Applique le conseil affiché : ajoute le montant suggéré à l'objectif épinglé (ou premier) de
@@ -827,6 +835,10 @@ function AppDashboard() {
               selfDef={selfDef}
               setSelfDef={setSelfDef}
               fixedCharges={fixedCharges}
+              profileName={profileName}
+              setProfileName={setProfileName}
+              profileSituation={profileSituation}
+              setProfileSituation={setProfileSituation}
             />
           )}
         </main>
@@ -2599,12 +2611,20 @@ function CompteTab({
   selfDef,
   setSelfDef,
   fixedCharges,
+  profileName,
+  setProfileName,
+  profileSituation,
+  setProfileSituation,
 }: {
   data: Computed;
   detected: SpenderProfile;
   selfDef: SelfDef | null;
   setSelfDef: (v: SelfDef | null) => void;
   fixedCharges: { libelle: string; montant: number }[];
+  profileName: string;
+  setProfileName: (v: string) => void;
+  profileSituation: string;
+  setProfileSituation: (v: string) => void;
 }) {
   const color = PROFILE_COLOR[detected];
   const ratio =
@@ -2639,6 +2659,40 @@ function CompteTab({
           <span className="font-mono font-bold text-white">{ratio}%</span> de tes revenus en
           moyenne.
         </p>
+      </section>
+
+      <section className="glass-strong rounded-3xl p-6 space-y-3">
+        <h3 className="font-display text-lg font-bold">Ma situation</h3>
+        <p className="text-xs text-white/60">
+          Ces informations sont utilisées par le Renard pour personnaliser ses conseils
+          (à la place d'un profil générique).
+        </p>
+        <div className="space-y-1.5">
+          <label className="text-xs text-white/60" htmlFor="profile-name">
+            Prénom
+          </label>
+          <input
+            id="profile-name"
+            type="text"
+            value={profileName}
+            onChange={(e) => setProfileName(e.target.value)}
+            placeholder="Ex: Anisse"
+            className="w-full rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/30"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs text-white/60" htmlFor="profile-situation">
+            Ma situation
+          </label>
+          <textarea
+            id="profile-situation"
+            value={profileSituation}
+            onChange={(e) => setProfileSituation(e.target.value)}
+            placeholder="Ex: étudiant en colocation à 5 à Lille, budget serré avec des dépenses partagées"
+            rows={2}
+            className="w-full rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/30 resize-none"
+          />
+        </div>
       </section>
 
       {fixedCharges.length > 0 && (

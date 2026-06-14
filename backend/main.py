@@ -70,6 +70,8 @@ class InsightRequest(BaseModel):
     transactions: list[TransactionIn]
     pot_cible: str = "Cotisation WEI 2026"
     self_def: str | None = None
+    name: str | None = None
+    situation: str | None = None
 
 
 class InsightResponse(BaseModel):
@@ -228,7 +230,7 @@ def build_transactions(df: pd.DataFrame) -> list[dict]:
     return transactions
 
 
-OLLAMA_MODEL = "qwen2.5:7b"
+OLLAMA_MODEL = "llama3.2:3b"
 # Garde le modèle chargé en mémoire entre deux requêtes : sur CPU, le rechargement
 # du modèle est souvent le principal poste de latence.
 OLLAMA_KEEP_ALIVE = "30m"
@@ -296,9 +298,25 @@ def _invoke_insight_chain(pydantic_model: type[BaseModel], template: str, input_
         return fallback
 
 
+DEFAULT_SITUATION = "qui gère son budget personnel"
+
+
+def _profile_context(name: str | None, situation: str | None) -> tuple[str, str]:
+    """Retourne (nom, situation) avec des valeurs par défaut génériques, pour que les
+    prompts s'adaptent au profil de chaque utilisateur au lieu de viser une personne
+    et une situation de vie fixées en dur (ex: "Anisse, étudiant en colocation à
+    Lille")."""
+    final_name = name.strip() if name and name.strip() else "l'utilisateur"
+    final_situation = situation.strip() if situation and situation.strip() else DEFAULT_SITUATION
+    return final_name, final_situation
+
+
 def generate_insight(budget: list[dict], pots_data: dict, transactions: list[dict]) -> dict:
+    name, situation = _profile_context(
+        pots_data.get("user", {}).get("name"), pots_data.get("user", {}).get("situation")
+    )
     template = (
-        "Tu es un conseiller financier pour des étudiants en colocation.\n"
+        "Tu es un conseiller financier pour {name}, {situation}.\n"
         "Budget mensuel par catégorie (en euros, dépenses) : {budget}\n"
         "État des pots d'épargne : {pots}\n"
         "Dernières transactions : {transactions}\n\n"
@@ -314,33 +332,44 @@ def generate_insight(budget: list[dict], pots_data: dict, transactions: list[dic
         '"potSource": "courant", "potCible": "epargne_longue"}}'
     )
     inputs = {
+        "name": name,
+        "situation": situation,
         "budget": json.dumps(budget, ensure_ascii=False),
         "pots": json.dumps(pots_data.get("pots", []), ensure_ascii=False),
         "transactions": json.dumps(transactions, ensure_ascii=False),
     }
-    return _invoke_insight_chain(InsightModel, template, ["budget", "pots", "transactions"], inputs, FALLBACK_PAYLOAD["insight"])
+    return _invoke_insight_chain(InsightModel, template, ["name", "situation", "budget", "pots", "transactions"], inputs, FALLBACK_PAYLOAD["insight"])
 
 
-SELF_DEF_PROFILES = {
-    "pleasure": (
-        "Anisse a choisi de se faire plaisir sans culpabiliser : propose une épargne en douceur, "
-        "sur les petites marges détectées, sans toucher aux sorties ou achats plaisir."
-    ),
-    "restrict": (
-        "Anisse est prêt à se restreindre pour atteindre ses objectifs plus vite : propose une "
-        "épargne plus ambitieuse en réduisant les dépenses non essentielles."
-    ),
-}
+def _self_def_profile(self_def: str | None, name: str) -> str:
+    if self_def == "pleasure":
+        return (
+            f"{name} a choisi de se faire plaisir sans culpabiliser : propose une épargne en douceur, "
+            "sur les petites marges détectées, sans toucher aux sorties ou achats plaisir."
+        )
+    if self_def == "restrict":
+        return (
+            f"{name} est prêt à se restreindre pour atteindre ses objectifs plus vite : propose une "
+            "épargne plus ambitieuse en réduisant les dépenses non essentielles."
+        )
+    return f"{name} n'a pas encore précisé son style d'épargne, reste neutre et encourageant."
 
 
-def generate_live_insight(balance: float, transactions: list[TransactionIn], pot_cible: str, self_def: str | None = None) -> dict:
+def generate_live_insight(
+    balance: float,
+    transactions: list[TransactionIn],
+    pot_cible: str,
+    self_def: str | None = None,
+    name: str | None = None,
+    situation: str | None = None,
+) -> dict:
+    profile_name, profile_situation = _profile_context(name, situation)
     template = (
-        "Tu es un conseiller financier pour Anisse, étudiant en colocation à 5 à Lille, "
-        "qui gère un budget très serré avec des dépenses partagées.\n"
+        "Tu es un conseiller financier pour {name}, {situation}.\n"
         "Solde actuel du compte courant : {balance} €\n"
         "Dernières transactions (libellé, montant en euros, date) : {transactions}\n"
         "Pot d'épargne cible : '{pot_cible}'\n"
-        "Style d'épargne d'Anisse : {profile}\n\n"
+        "Style d'épargne de {name} : {profile}\n\n"
         "Analyse l'évolution du solde au fil des transactions ci-dessus avant de répondre.\n"
         "- Si le solde actuel permet de mettre de côté un petit montant sans risque, donne UN SEUL "
         "conseil court et actionnable pour transférer ce montant vers le pot '{pot_cible}', "
@@ -357,13 +386,15 @@ def generate_live_insight(balance: float, transactions: list[TransactionIn], pot
         '"potCible": "{pot_cible}"}}'
     )
     inputs = {
+        "name": profile_name,
+        "situation": profile_situation,
         "balance": balance,
         "transactions": json.dumps([t.model_dump() for t in transactions], ensure_ascii=False),
         "pot_cible": pot_cible,
-        "profile": SELF_DEF_PROFILES.get(self_def, "Anisse n'a pas encore précisé son style d'épargne, reste neutre et encourageant."),
+        "profile": _self_def_profile(self_def, profile_name),
     }
     fallback = LIVE_FALLBACK_LOW_BALANCE if balance < LOW_BALANCE_THRESHOLD else {**LIVE_FALLBACK, "potCible": pot_cible}
-    result = _invoke_insight_chain(InsightResponse, template, ["balance", "transactions", "pot_cible", "profile"], inputs, fallback)
+    result = _invoke_insight_chain(InsightResponse, template, ["name", "situation", "balance", "transactions", "pot_cible", "profile"], inputs, fallback)
 
     # Le LLM (llama3.2:3b) ne respecte pas toujours la consigne "pas de transfert si solde bas" :
     # on applique un garde-fou strict en post-traitement plutôt que de lui faire confiance.
@@ -419,7 +450,14 @@ def get_insight():
 
 @app.post("/api/insight", response_model=InsightResponse)
 def post_insight(payload: InsightRequest):
-    return generate_live_insight(payload.balance, payload.transactions, payload.pot_cible, payload.self_def)
+    return generate_live_insight(
+        payload.balance,
+        payload.transactions,
+        payload.pot_cible,
+        payload.self_def,
+        payload.name,
+        payload.situation,
+    )
 
 
 @app.post("/api/fixed-charges", response_model=FixedChargesResponse)
