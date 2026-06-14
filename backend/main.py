@@ -72,6 +72,8 @@ class InsightRequest(BaseModel):
     self_def: str | None = None
     name: str | None = None
     situation: str | None = None
+    monthly_income: float | None = None
+    goal_missed_streak: bool = False
 
 
 class InsightResponse(BaseModel):
@@ -323,7 +325,9 @@ def generate_insight(budget: list[dict], pots_data: dict, transactions: list[dic
         "Donne UN SEUL conseil d'épargne actionnable, orienté vers la sécurisation "
         "du pot 'Cotisation WEI 2026' (id potCible: epargne_longue), en débitant le "
         "pot courant (id potSource: courant), SANS toucher aux dépenses vitales "
-        "(Loyer, Nourriture, Transport).\n\n"
+        "(Loyer, Nourriture, Transport).\n"
+        "Ce conseil doit être CHIFFRÉ avec un montant précis en euros : une réponse vague "
+        'comme "dépense moins" ou "fais attention à tes dépenses" est INTERDITE.\n\n'
         "Réponds UNIQUEMENT avec un objet JSON de cette forme exacte, sans aucun texte "
         "avant ou après, sans raisonnement, sans bloc de code markdown "
         "(remplace les valeurs par ton conseil) :\n"
@@ -362,14 +366,36 @@ def generate_live_insight(
     self_def: str | None = None,
     name: str | None = None,
     situation: str | None = None,
+    monthly_income: float | None = None,
+    goal_missed_streak: bool = False,
 ) -> dict:
     profile_name, profile_situation = _profile_context(name, situation)
+
+    rules = [
+        "Chaque conseil doit être CHIFFRÉ avec un montant précis en euros : une réponse vague "
+        'comme "dépense moins" ou "fais attention à tes dépenses" est INTERDITE.'
+    ]
+    if monthly_income is not None and monthly_income < 1200:
+        max_saving = round(monthly_income * 0.10, 2)
+        rules.append(
+            f"Le revenu mensuel de {profile_name} est de {monthly_income} €, soit moins de 1200 € : "
+            f"ne suggère JAMAIS d'épargner plus de 10% de ce revenu, soit un maximum de {max_saving} €."
+        )
+    if goal_missed_streak:
+        rules.append(
+            f"{profile_name} a manqué son objectif d'épargne 2 mois de suite : propose de revoir "
+            "cet objectif à la baisse plutôt que de maintenir la pression sur le montant actuel."
+        )
+    rules_text = "\n".join(f"- {r}" for r in rules)
+
     template = (
         "Tu es un conseiller financier pour {name}, {situation}.\n"
         "Solde actuel du compte courant : {balance} €\n"
         "Dernières transactions (libellé, montant en euros, date) : {transactions}\n"
         "Pot d'épargne cible : '{pot_cible}'\n"
         "Style d'épargne de {name} : {profile}\n\n"
+        "Règles à respecter impérativement :\n"
+        "{rules}\n\n"
         "Analyse l'évolution du solde au fil des transactions ci-dessus avant de répondre.\n"
         "- Si le solde actuel permet de mettre de côté un petit montant sans risque, donne UN SEUL "
         "conseil court et actionnable pour transférer ce montant vers le pot '{pot_cible}', "
@@ -392,9 +418,10 @@ def generate_live_insight(
         "transactions": json.dumps([t.model_dump() for t in transactions], ensure_ascii=False),
         "pot_cible": pot_cible,
         "profile": _self_def_profile(self_def, profile_name),
+        "rules": rules_text,
     }
     fallback = LIVE_FALLBACK_LOW_BALANCE if balance < LOW_BALANCE_THRESHOLD else {**LIVE_FALLBACK, "potCible": pot_cible}
-    result = _invoke_insight_chain(InsightResponse, template, ["name", "situation", "balance", "transactions", "pot_cible", "profile"], inputs, fallback)
+    result = _invoke_insight_chain(InsightResponse, template, ["name", "situation", "balance", "transactions", "pot_cible", "profile", "rules"], inputs, fallback)
 
     # Le LLM (llama3.2:3b) ne respecte pas toujours la consigne "pas de transfert si solde bas" :
     # on applique un garde-fou strict en post-traitement plutôt que de lui faire confiance.
@@ -457,6 +484,8 @@ def post_insight(payload: InsightRequest):
         payload.self_def,
         payload.name,
         payload.situation,
+        payload.monthly_income,
+        payload.goal_missed_streak,
     )
 
 

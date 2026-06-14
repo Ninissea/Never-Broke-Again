@@ -208,6 +208,7 @@ type MonthRow = {
 type Computed = {
   income: number;
   expense: number;
+  monthlyIncome: number;
   recent: Transaction[];
   baseline: Record<BudgetCat, number>;
   monthlyBudget: Record<BudgetCat, number>;
@@ -380,6 +381,7 @@ function compute(
   return {
     income,
     expense,
+    monthlyIncome,
     recent,
     baseline,
     monthlyBudget,
@@ -391,6 +393,19 @@ function compute(
     months,
     streak,
   };
+}
+
+// Nombre de mois consécutifs (les plus récents, hors mois en cours) où l'épargne réalisée
+// n'a pas atteint l'objectif mensuel visé.
+function goalMissedStreak(months: MonthRow[], monthlyGoal: number): number {
+  if (monthlyGoal <= 0) return 0;
+  const past = months.slice(0, -1);
+  let streak = 0;
+  for (let i = past.length - 1; i >= 0; i--) {
+    if (past[i].saved < monthlyGoal) streak++;
+    else break;
+  }
+  return streak;
 }
 
 // ---------- SVG Donut with predefined zones + shrinking light part ----------
@@ -644,6 +659,8 @@ function AppDashboard() {
       recent: { label: string; amount: number; date: string }[],
       potCible: string,
       profile: SelfDef | null,
+      monthlyIncome: number,
+      missedGoalStreak: number,
     ) => {
       setInsightLoading(true);
       try {
@@ -657,6 +674,8 @@ function AppDashboard() {
             self_def: profile,
             name: profileName || null,
             situation: profileSituation || null,
+            monthly_income: monthlyIncome,
+            goal_missed_streak: missedGoalStreak >= 2,
           }),
         });
         if (!res.ok) throw new Error("Réponse invalide");
@@ -727,9 +746,10 @@ function AppDashboard() {
         amount: t.amount,
         date: t.date.toISOString().slice(0, 10),
       }));
-      await fetchInsight(balance, recent, potCible, choice);
+      const goal = monthlySavingsTarget(shortGoals) + monthlySavingsTarget(longGoals);
+      await fetchInsight(balance, recent, potCible, choice, d.monthlyIncome, goalMissedStreak(d.months, goal));
     },
-    [txs, shortGoals, setSelfDef, fetchInsight],
+    [txs, shortGoals, longGoals, setSelfDef, fetchInsight],
   );
 
   // Panneau de démo : simule une dépense Fast-Food de 15€ et interroge le conseiller IA local.
@@ -757,8 +777,16 @@ function AppDashboard() {
       amount: t.amount,
       date: t.date.toISOString().slice(0, 10),
     }));
-    await fetchInsight(balance, recent, potCible, selfDef);
-  }, [txs, shortGoals, selfDef, fetchInsight]);
+    const goal = monthlySavingsTarget(shortGoals) + monthlySavingsTarget(longGoals);
+    await fetchInsight(
+      balance,
+      recent,
+      potCible,
+      selfDef,
+      updatedData.monthlyIncome,
+      goalMissedStreak(updatedData.months, goal),
+    );
+  }, [txs, shortGoals, longGoals, selfDef, fetchInsight]);
 
   return (
     <div className="min-h-screen relative overflow-hidden pb-32">
