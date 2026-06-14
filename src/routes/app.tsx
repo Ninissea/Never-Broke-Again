@@ -172,6 +172,8 @@ type Computed = {
   net: number;
   recent: Transaction[];
   baseline: Record<BudgetCat, number>;
+  weeklyBudget: Record<BudgetCat, number>;
+  weeklyDisposable: number;
   currentWeek: Record<BudgetCat, number>;
   currentWeekSaved: number;
   currentWeekDow: number;
@@ -232,7 +234,15 @@ function fixedChargeCandidates(txs: Transaction[]): {
   return { items, months: Math.max(1, months.size) };
 }
 
-function compute(txs: Transaction[], fixedChargeLabels: Set<string> = new Set()): Computed {
+// Nombre moyen de semaines par mois (52 / 12), pour convertir des montants mensuels en hebdomadaires.
+const WEEKS_PER_MONTH = 4.33;
+
+function compute(
+  txs: Transaction[],
+  fixedChargeLabels: Set<string> = new Set(),
+  fixedChargesMonthlyTotal = 0,
+  weeklySavingsGoal = 0,
+): Computed {
   const income = txs.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
   const expense = txs.filter((t) => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
   const net = Math.max(0, income - expense);
@@ -289,6 +299,21 @@ function compute(txs: Transaction[], fixedChargeLabels: Set<string> = new Set())
   }
   if (pastKeys.length === 0) Object.assign(baseline, currentWeek);
 
+  // Budget hebdomadaire "plan" : ce qu'il reste chaque semaine une fois le salaire mensuel
+  // amputé des charges fixes et de l'objectif d'épargne, réparti entre catégories selon
+  // les proportions observées historiquement (baseline).
+  const txMonths = new Set(txs.map((t) => `${t.date.getFullYear()}-${t.date.getMonth()}`));
+  const monthlyIncome = income / Math.max(1, txMonths.size);
+  const weeklyDisposable = Math.max(
+    0,
+    (monthlyIncome - fixedChargesMonthlyTotal) / WEEKS_PER_MONTH - weeklySavingsGoal,
+  );
+  const baselineTotal = (Object.values(baseline) as number[]).reduce((s, v) => s + v, 0);
+  const weeklyBudget = emptyCats();
+  (Object.keys(baseline) as BudgetCat[]).forEach((c) => {
+    weeklyBudget[c] = baselineTotal > 0 ? weeklyDisposable * (baseline[c] / baselineTotal) : 0;
+  });
+
   // Position dans la semaine en cours, basée sur la dernière transaction du relevé (et non
   // la date du jour) : on simule comme si "aujourd'hui" était ce dernier jour connu.
   let currentWeekDow = 1;
@@ -310,6 +335,8 @@ function compute(txs: Transaction[], fixedChargeLabels: Set<string> = new Set())
     net,
     recent,
     baseline,
+    weeklyBudget,
+    weeklyDisposable,
     currentWeek,
     currentWeekSaved,
     currentWeekDow,
@@ -512,9 +539,18 @@ function AppDashboard() {
     () => new Set(fixedCharges.map((c) => normalizeLabel(c.libelle))),
     [fixedCharges],
   );
+  const fixedChargesMonthlyTotal = useMemo(
+    () => fixedCharges.reduce((s, c) => s + c.montant, 0),
+    [fixedCharges],
+  );
+  const weeklySavingsGoal = useMemo(
+    () => weeklySavingsTarget(shortGoal, longGoal),
+    [shortGoal, longGoal],
+  );
   const data = useMemo(
-    () => (txs ? compute(txs, fixedChargeLabels) : null),
-    [txs, fixedChargeLabels],
+    () =>
+      txs ? compute(txs, fixedChargeLabels, fixedChargesMonthlyTotal, weeklySavingsGoal) : null,
+    [txs, fixedChargeLabels, fixedChargesMonthlyTotal, weeklySavingsGoal],
   );
   const detectedProfile = useMemo<SpenderProfile | null>(
     () => (data ? detectProfile(data.income, data.expense) : null),
@@ -998,19 +1034,19 @@ function BudgetPie({
   const dow = data.currentWeekDow;
   const factor = dow / 7; // 1 = fin de semaine
 
-  // Pour chaque catégorie, consommé = max(réel cette semaine, projection = baseline * factor).
+  // Pour chaque catégorie, consommé = max(réel cette semaine, projection = budget * factor).
   // La projection ne doit jamais "reculer" quand une dépense réelle est ajoutée : on prend
   // le plus grand des deux plutôt que de remplacer la projection par le réel.
   const consumed: Record<BudgetCat, number> = emptyCats();
-  (Object.keys(data.baseline) as BudgetCat[]).forEach((c) => {
+  (Object.keys(data.weeklyBudget) as BudgetCat[]).forEach((c) => {
     const real = data.currentWeek[c] || 0;
-    consumed[c] = Math.max(real, data.baseline[c] * factor);
+    consumed[c] = Math.max(real, data.weeklyBudget[c] * factor);
   });
 
   const savingsTarget = weeklySavingsTarget(shortGoal, longGoal);
   const savingsFilled = Math.min(savingsTarget, data.currentWeekSaved);
 
-  const slices = buildSlices(data.baseline, consumed, savingsTarget, savingsFilled);
+  const slices = buildSlices(data.weeklyBudget, consumed, savingsTarget, savingsFilled);
   const totalBudget = slices.reduce((s, x) => s + x.total, 0);
   const totalConsumed = slices.reduce((s, x) => s + Math.min(x.total, x.filled), 0);
 
