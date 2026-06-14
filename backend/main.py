@@ -99,6 +99,36 @@ class FixedChargesResponse(BaseModel):
     charges: list[FixedCharge] = Field(description="Liste des charges fixes mensuelles détectées")
 
 
+class SavingsGoalIn(BaseModel):
+    name: str
+    target: float = 0
+    saved: float = 0
+    deadline: str = ""
+    kind: str = "short"
+
+
+class BudgetAdviceRequest(BaseModel):
+    monthly_disposable: float
+    fixed_charges: float = 0
+    monthly_savings_goal: float = 0
+    current_spending: dict[str, float] = {}
+    baseline: dict[str, float] = {}
+    goals: list[SavingsGoalIn] = []
+    self_def: str | None = None
+
+
+class BudgetCategoryAmount(BaseModel):
+    categorie: str = Field(description="Nom de la catégorie de dépense")
+    montant: float = Field(description="Budget conseillé pour cette catégorie le mois prochain, en euros")
+
+
+class BudgetAdviceResponse(BaseModel):
+    titre: str = Field(description="Titre court du conseil")
+    message: str = Field(description="Synthèse du conseil budgétaire pour le mois prochain")
+    budget: list[BudgetCategoryAmount] = Field(description="Budget conseillé par catégorie pour le mois prochain")
+    conseils: list[str] = Field(description="Conseils pratiques pour réduire certaines dépenses")
+
+
 LIVE_FALLBACK = {
     "titre": "Petit écart, grande discipline",
     "message": (
@@ -172,6 +202,108 @@ def generate_fixed_charges(items: list[RecurringItem], months: int) -> dict:
         "months": months,
     }
     return _invoke_insight_chain(FixedChargesResponse, template, ["items", "months"], inputs, fallback)
+
+
+def budget_advice_fallback(payload: "BudgetAdviceRequest") -> dict:
+    """Répartit le revenu disponible du mois prochain entre les catégories selon les
+    proportions observées historiquement (baseline), et propose de réduire les postes
+    les plus dépassés par rapport au budget recommandé."""
+    baseline = payload.baseline
+    disposable = max(0.0, payload.monthly_disposable)
+    total_baseline = sum(baseline.values())
+    budget = []
+    overruns = []
+    for cat, base in baseline.items():
+        montant = disposable * (base / total_baseline) if total_baseline > 0 else 0.0
+        budget.append({"categorie": cat, "montant": round(montant, 2)})
+        spent = payload.current_spending.get(cat, 0.0)
+        if spent > montant > 0:
+            overruns.append((cat, spent - montant))
+
+    overruns.sort(key=lambda x: x[1], reverse=True)
+    conseils = [
+        f"Réduis tes dépenses en {cat} d'environ {round(diff)}€ ce mois pour revenir dans ton budget."
+        for cat, diff in overruns[:3]
+    ]
+
+    pinned_goals = [g for g in payload.goals if g.target > g.saved]
+    for g in pinned_goals[:2]:
+        manque = g.target - g.saved
+        conseils.append(
+            f"Continue à mettre de côté pour ton objectif « {g.name} » : il te reste {round(manque)}€ à épargner."
+        )
+
+    if not conseils:
+        conseils.append("Ton budget est équilibré : maintiens ce rythme le mois prochain.")
+
+    return {
+        "titre": "Budget conseillé pour le mois prochain",
+        "message": (
+            "Voici une répartition de ton revenu disponible pour le mois prochain, basée sur tes "
+            "habitudes de dépenses et tes objectifs d'épargne."
+        ),
+        "budget": budget,
+        "conseils": conseils,
+    }
+
+
+SELF_DEF_BUDGET_PROFILES = {
+    "pleasure": (
+        "L'utilisateur veut se faire plaisir sans culpabiliser : garde des marges confortables sur "
+        "les loisirs et le shopping, et propose des réductions douces sur les autres postes."
+    ),
+    "restrict": (
+        "L'utilisateur est prêt à se restreindre pour atteindre ses objectifs plus vite : propose des "
+        "réductions plus ambitieuses sur les postes non essentiels (loisirs, shopping)."
+    ),
+}
+
+
+def generate_budget_advice(payload: "BudgetAdviceRequest") -> dict:
+    fallback = budget_advice_fallback(payload)
+    if not payload.baseline and not payload.current_spending:
+        return fallback
+
+    template = (
+        "Tu es un conseiller financier qui prépare le budget du mois prochain d'un utilisateur.\n"
+        "Revenu disponible pour le mois prochain (après charges fixes et épargne) : {disposable} €\n"
+        "Charges fixes mensuelles : {fixed} €\n"
+        "Objectif d'épargne mensuel total : {savings_goal} €\n"
+        "Dépenses moyennes par catégorie sur les mois précédents : {baseline}\n"
+        "Dépenses du mois en cours par catégorie : {current_spending}\n"
+        "Objectifs d'épargne en cours : {goals}\n"
+        "Style de l'utilisateur : {profile}\n\n"
+        "Propose un budget par catégorie pour le mois prochain qui respecte le revenu disponible "
+        "(la somme des montants ne doit pas dépasser {disposable} €), et donne 2 à 4 conseils "
+        "pratiques et concrets pour réduire les postes de dépenses qui dépassent leur budget, afin "
+        "d'aider l'utilisateur à atteindre ses objectifs d'épargne. Reste encourageant.\n\n"
+        "Réponds UNIQUEMENT avec un objet JSON de cette forme exacte, sans aucun texte avant ou "
+        "après, sans raisonnement, sans bloc de code markdown (remplace les valeurs par ton "
+        "conseil, garde les mêmes catégories que dans les dépenses moyennes) :\n"
+        '{{"titre": "Budget conseillé pour le mois prochain", "message": "Voici comment '
+        'répartir ton revenu disponible le mois prochain.", '
+        '"budget": [{{"categorie": "Nourriture", "montant": 200}}, '
+        '{{"categorie": "Transport", "montant": 50}}], '
+        '"conseils": ["Réduis tes sorties au restaurant de 30€ ce mois-ci pour avancer vers ton objectif."]}}'
+    )
+    inputs = {
+        "disposable": payload.monthly_disposable,
+        "fixed": payload.fixed_charges,
+        "savings_goal": payload.monthly_savings_goal,
+        "baseline": json.dumps(payload.baseline, ensure_ascii=False),
+        "current_spending": json.dumps(payload.current_spending, ensure_ascii=False),
+        "goals": json.dumps([g.model_dump() for g in payload.goals], ensure_ascii=False),
+        "profile": SELF_DEF_BUDGET_PROFILES.get(
+            payload.self_def, "L'utilisateur n'a pas encore précisé son style d'épargne, reste neutre."
+        ),
+    }
+    return _invoke_insight_chain(
+        BudgetAdviceResponse,
+        template,
+        ["disposable", "fixed", "savings_goal", "baseline", "current_spending", "goals", "profile"],
+        inputs,
+        fallback,
+    )
 
 
 def categorize(libelle: str, montant: float) -> str:
@@ -425,3 +557,8 @@ def post_insight(payload: InsightRequest):
 @app.post("/api/fixed-charges", response_model=FixedChargesResponse)
 def post_fixed_charges(payload: FixedChargesRequest):
     return generate_fixed_charges(payload.items, payload.months)
+
+
+@app.post("/api/budget-advice", response_model=BudgetAdviceResponse)
+def post_budget_advice(payload: BudgetAdviceRequest):
+    return generate_budget_advice(payload)

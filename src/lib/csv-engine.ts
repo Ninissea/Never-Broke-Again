@@ -54,7 +54,39 @@ const RULES: { cat: Category; kw: RegExp }[] = [
   { cat: "Virements", kw: /virement|vir sepa|prelevement/i },
 ];
 
+// Beaucoup d'exports bancaires (Boursorama notamment) utilisent directement le nom de la
+// catégorie comme libellé de transaction ("Nourriture", "Transport", "Loisirs"...) plutôt
+// qu'un nom de commerçant. On normalise (minuscules, accents/caractères spéciaux retirés)
+// pour reconnaître ces libellés en priorité, avant les règles par mot-clé commerçant.
+// La normalisation gère aussi les libellés mal encodés (ex. "TÃ©lÃ©com"), qui se réduisent
+// à la même clé que leur version correcte ("Télécom" -> "tlcom").
+function normalizeForCategory(label: string): string {
+  return label.toLowerCase().replace(/[^a-z]/g, "");
+}
+
+const DIRECT_CATEGORY_LABELS: Record<string, Category> = {
+  nourriture: "Courses",
+  transport: "Transport",
+  loisirs: "Loisirs",
+  divertissement: "Loisirs",
+  shopping: "Shopping",
+  loyer: "Loyer & Charges",
+  logement: "Loyer & Charges",
+  tlcom: "Abonnements",
+  telecom: "Abonnements",
+  abonnement: "Abonnements",
+  abonnements: "Abonnements",
+  sant: "Santé",
+  scolarit: "Loyer & Charges",
+  retrait: "Autre",
+  revenus: "Revenus",
+  virement: "Virements",
+  virements: "Virements",
+};
+
 function categorize(label: string, amount: number): Category {
+  const direct = DIRECT_CATEGORY_LABELS[normalizeForCategory(label)];
+  if (direct) return direct;
   if (amount > 0 && /salaire|paie|virement recu|caf|bourse|remboursement/i.test(label))
     return "Revenus";
   for (const r of RULES) if (r.kw.test(label)) return r.cat;
@@ -67,6 +99,19 @@ const num = (s: string): number => {
   const n = parseFloat(cleaned);
   return isNaN(n) ? NaN : n;
 };
+
+// Répare les libellés mal encodés ("TÃ©lÃ©com" -> "Télécom"), fréquents sur certains
+// exports bancaires (texte UTF-8 réinterprété en Latin-1 puis ré-encodé en UTF-8).
+function fixMojibake(label: string): string {
+  if (!/[ÃÂ]/.test(label)) return label;
+  try {
+    const bytes = Uint8Array.from(label, (c) => c.charCodeAt(0));
+    if ([...bytes].some((b) => b > 0xff)) return label;
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return label;
+  }
+}
 
 const parseDate = (s: string): Date | null => {
   if (!s) return null;
@@ -131,7 +176,7 @@ export async function parseCsv(file: File): Promise<Transaction[]> {
             .slice(headerIdx + 1)
             .map((cells, i): Transaction | null => {
               const date = parseDate(cells[dateKey]);
-              const label = (cells[labelKey] || "").toString().trim();
+              const label = fixMojibake((cells[labelKey] || "").toString().trim());
               if (!date || !label) return null;
               let amount = NaN;
               if (amountIdx >= 0) amount = num(cells[amountIdx]);

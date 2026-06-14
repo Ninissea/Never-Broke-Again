@@ -79,8 +79,14 @@ type SavingsGoal = {
 };
 type SelfDef = "pleasure" | "restrict";
 type SpenderProfile = "depensier" | "raisonnable" | "econome";
-type TabId = "epargne" | "stats" | "formation" | "compte";
+type TabId = "epargne" | "stats" | "analyse" | "formation" | "compte";
 type InsightData = { titre: string; message: string; montant: number; potCible: string };
+type BudgetAdvice = {
+  titre: string;
+  message: string;
+  budget: { categorie: string; montant: number }[];
+  conseils: string[];
+};
 
 const LS_KEYS = {
   shortGoals: "nba.shortGoals",
@@ -216,6 +222,8 @@ type Computed = {
   currentMonthDays: number;
   months: MonthRow[];
   streak: number;
+  pastIncome: number;
+  pastExpense: number;
 };
 
 const emptyCats = (): Record<BudgetCat, number> => ({
@@ -321,7 +329,7 @@ function compute(
       label: monthLabel(k),
       income: inc,
       spent: exp,
-      saved: Math.max(0, inc - exp),
+      saved: inc - exp,
       cats,
     };
   });
@@ -368,12 +376,20 @@ function compute(
     currentMonthDays = daysInMonth(maxDate.getFullYear(), maxDate.getMonth());
   }
 
-  // Nombre de mois consécutifs (les plus récents) où une épargne a été réalisée.
-  let streak = 0;
-  for (let i = months.length - 1; i >= 0; i--) {
-    if (months[i].saved > 0) streak++;
-    else break;
-  }
+  // Le profil de dépense (dépensier/raisonnable/économe) et la "streak" sont établis à partir
+  // des mois précédents déjà bouclés (hors mois en cours, encore incomplet).
+  const completedMonths = months.slice(0, -1);
+  const pastIncome = completedMonths.length
+    ? completedMonths.reduce((s, m) => s + m.income, 0)
+    : income;
+  const pastExpense = completedMonths.length
+    ? completedMonths.reduce((s, m) => s + m.spent, 0)
+    : expense;
+
+  // La streak est un compteur d'usage de l'application (mois consécutifs d'épargne réussie
+  // *depuis le démarrage avec le Renard*) : elle démarre toujours à 0, indépendamment de
+  // l'historique des relevés importés pour établir le profil.
+  const streak = 0;
 
   return {
     income,
@@ -388,6 +404,8 @@ function compute(
     currentMonthDays,
     months,
     streak,
+    pastIncome,
+    pastExpense,
   };
 }
 
@@ -524,7 +542,15 @@ function pinnedOrFirst(goals: SavingsGoal[]): SavingsGoal | null {
 // ---------- Root ----------
 function AppDashboard() {
   const navigate = useNavigate();
+  // Relevés des mois précédents (1ère page d'onboarding), utilisés pour établir le profil
+  // de dépense. `txs` (relevés précédents + mois actuel fusionnés) n'est défini qu'une fois
+  // la 2ème page d'onboarding complétée.
+  const [pastTxs, setPastTxs] = useState<Transaction[] | null>(null);
   const [txs, setTxs] = useState<Transaction[] | null>(null);
+  // Relevé du mois actuel (étape 2 de l'onboarding, fichier unique) : sert exclusivement au
+  // solde disponible ("Dépenses courantes") et au camembert du budget du mois, indépendamment
+  // de l'historique fusionné `txs` utilisé pour les statistiques et le profil.
+  const [currentTxs, setCurrentTxs] = useState<Transaction[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -537,14 +563,18 @@ function AppDashboard() {
   const [selfDef, setSelfDef] = useLS<SelfDef | null>(LS_KEYS.selfDef, null);
   const [shortGoals, setShortGoals] = useGoalsLS(LS_KEYS.shortGoals);
   const [longGoals, setLongGoals] = useGoalsLS(LS_KEYS.longGoals);
+  // Étape "au moins 1 objectif d'épargne" de l'onboarding : déjà acquise si l'utilisateur a
+  // déjà des objectifs enregistrés (ex. session précédente).
+  const [goalsStepDone, setGoalsStepDone] = useState(
+    () => shortGoals.length + longGoals.length > 0,
+  );
   const [insight, setInsight] = useState<InsightData | null>(null);
   const [insightLoading, setInsightLoading] = useState(false);
   // L'utilisateur applique manuellement le conseil du Renard (sinon il reste juste informatif).
   const [insightApplied, setInsightApplied] = useState(false);
   const [fixedCharges, setFixedCharges] = useState<{ libelle: string; montant: number }[]>([]);
-  // Nombre de fichiers CSV déposés lors de la 1ère importation : indique sur combien de mois
-  // portent les revenus affichés dans le portefeuille "Dépenses courantes".
-  const [importedMonths, setImportedMonths] = useState<number | null>(null);
+  const [budgetAdvice, setBudgetAdvice] = useState<BudgetAdvice | null>(null);
+  const [budgetAdviceLoading, setBudgetAdviceLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Demande au conseiller IA local de repérer les charges fixes mensuelles (loyer, abonnements...)
@@ -585,18 +615,11 @@ function AppDashboard() {
           setLoading(false);
           return;
         }
-        const isFirstImport = txs === null;
         // On conserve l'historique : les nouveaux relevés sont fusionnés avec ceux déjà
         // importés (sans doublons), plutôt que de remplacer l'analyse précédente.
         const merged = mergeTransactions(txs ?? [], parsed);
         setTxs(merged);
-        setImportedMonths((prev) => (prev ?? 0) + fileArr.length);
         setShowDropZone(false);
-        if (isFirstImport) {
-          setIntroDone(false);
-          setInsight(null);
-          setInsightApplied(false);
-        }
         await fetchFixedCharges(merged);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Erreur de lecture du fichier.");
@@ -605,6 +628,58 @@ function AppDashboard() {
       }
     },
     [fetchFixedCharges, txs],
+  );
+
+  // Étape 1 de l'onboarding : relevés des mois précédents, utilisés pour déterminer le
+  // profil de dépense (dépensier / raisonnable / économe).
+  const handlePastFiles = useCallback(async (files: File[]) => {
+    setError(null);
+    setLoading(true);
+    try {
+      const parsedLists = await Promise.all(files.map(parseCsv));
+      const parsed = parsedLists.flat();
+      if (!parsed.length) {
+        setError("Aucune transaction détectée.");
+        return;
+      }
+      setPastTxs(mergeTransactions([], parsed));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erreur de lecture du fichier.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Étape 2 de l'onboarding : relevé (fichier unique) du mois actuel, utilisé pour le solde
+  // disponible ("Dépenses courantes") et le camembert "Budget du mois". Conservé à part dans
+  // `currentTxs`, et aussi fusionné avec les mois précédents pour l'historique (`txs`).
+  const handleCurrentFiles = useCallback(
+    async (files: File[]) => {
+      setError(null);
+      setLoading(true);
+      try {
+        const parsedLists = await Promise.all(files.map(parseCsv));
+        const parsed = parsedLists.flat();
+        if (!parsed.length) {
+          setError("Aucune transaction détectée.");
+          return;
+        }
+        const merged = mergeTransactions(pastTxs ?? [], parsed);
+        setCurrentTxs(mergeTransactions([], parsed));
+        setTxs(merged);
+        setIntroDone(false);
+        setGoalsStepDone(shortGoals.length + longGoals.length > 0);
+        setInsight(null);
+        setInsightApplied(false);
+        setBudgetAdvice(null);
+        await fetchFixedCharges(merged);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Erreur de lecture du fichier.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [pastTxs, shortGoals, longGoals, fetchFixedCharges],
   );
 
   const fixedChargeLabels = useMemo(
@@ -624,11 +699,21 @@ function AppDashboard() {
       txs ? compute(txs, fixedChargeLabels, fixedChargesMonthlyTotal, monthlySavingsGoal) : null,
     [txs, fixedChargeLabels, fixedChargesMonthlyTotal, monthlySavingsGoal],
   );
+  // Calcul dédié au seul relevé du mois actuel (étape 2) : alimente le solde disponible
+  // ("Dépenses courantes") et le camembert "Budget du mois", indépendamment de l'historique.
+  const currentData = useMemo(
+    () =>
+      compute(currentTxs ?? txs ?? [], fixedChargeLabels, fixedChargesMonthlyTotal, monthlySavingsGoal),
+    [currentTxs, txs, fixedChargeLabels, fixedChargesMonthlyTotal, monthlySavingsGoal],
+  );
   const detectedProfile = useMemo<SpenderProfile | null>(
-    () => (data ? detectProfile(data.income, data.expense) : null),
+    () => (data ? detectProfile(data.pastIncome, data.pastExpense) : null),
     [data],
   );
-  const showIntro = !!txs && !introDone;
+  // Onboarding, dans l'ordre : CSV mois précédents -> CSV mois actuel -> au moins 1 objectif
+  // d'épargne -> profil détecté / style d'épargne -> tableau de bord.
+  const needsGoals = !!txs && !goalsStepDone;
+  const showIntro = !!txs && goalsStepDone && !introDone;
 
   // Interroge le conseiller IA local. Le conseil retourné reste purement informatif :
   // c'est l'utilisateur qui choisit de l'appliquer (voir applyInsight) à son pot d'épargne.
@@ -752,6 +837,58 @@ function AppDashboard() {
     await fetchInsight(balance, recent, potCible, selfDef);
   }, [txs, shortGoals, selfDef, fetchInsight]);
 
+  // Onglet "Conseil du Renard" : demande au LLM local un budget conseillé pour le mois
+  // prochain (par catégorie) et des pistes concrètes de réduction de dépenses, en fonction
+  // des objectifs d'épargne en cours.
+  const fetchBudgetAdvice = useCallback(async () => {
+    if (!data) return;
+    setBudgetAdviceLoading(true);
+    try {
+      const res = await fetch("http://localhost:8000/api/budget-advice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          monthly_disposable: data.monthlyDisposable,
+          fixed_charges: fixedChargesMonthlyTotal,
+          monthly_savings_goal: monthlySavingsGoal,
+          current_spending: currentData.currentMonth,
+          baseline: data.baseline,
+          goals: [
+            ...shortGoals.map((g) => ({ ...g, kind: "short" })),
+            ...longGoals.map((g) => ({ ...g, kind: "long" })),
+          ],
+          self_def: selfDef,
+        }),
+      });
+      if (!res.ok) throw new Error("Réponse invalide");
+      setBudgetAdvice(await res.json());
+    } catch {
+      const baselineTotal = (Object.values(data.baseline) as number[]).reduce(
+        (s, v) => s + v,
+        0,
+      );
+      setBudgetAdvice({
+        titre: "Budget conseillé pour le mois prochain",
+        message:
+          "Voici une répartition de ton revenu disponible pour le mois prochain, basée sur tes habitudes de dépenses.",
+        budget: (Object.entries(data.baseline) as [BudgetCat, number][]).map(([cat, base]) => ({
+          categorie: cat,
+          montant:
+            baselineTotal > 0 ? Math.round((data.monthlyDisposable * base) / baselineTotal) : 0,
+        })),
+        conseils: ["Vise à réduire tes postes de dépenses non essentiels pour avancer vers tes objectifs d'épargne."],
+      });
+    } finally {
+      setBudgetAdviceLoading(false);
+    }
+  }, [data, currentData, fixedChargesMonthlyTotal, monthlySavingsGoal, shortGoals, longGoals, selfDef]);
+
+  useEffect(() => {
+    if (tab === "analyse" && !budgetAdvice && !budgetAdviceLoading) {
+      void fetchBudgetAdvice();
+    }
+  }, [tab, budgetAdvice, budgetAdviceLoading, fetchBudgetAdvice]);
+
   return (
     <div className="min-h-screen relative overflow-hidden pb-32">
       <div className="glow-orb w-[500px] h-[500px] -top-40 -left-40 bg-[var(--ember)]" />
@@ -768,7 +905,7 @@ function AppDashboard() {
         >
           <ArrowLeft className="size-4" /> Retour
         </button>
-        {txs && (
+        {txs && !needsGoals && !showIntro && (
           <button
             onClick={() => {
               setWalletOpen(null);
@@ -781,10 +918,40 @@ function AppDashboard() {
         )}
       </header>
 
-      {!txs || showDropZone ? (
+      {!pastTxs ? (
+        <CsvStepDropZone
+          step={1}
+          title="Entre tes relevés bancaires des mois précédents"
+          description="Ces relevés permettent au Renard d'établir ton profil de dépense (dépensier, raisonnable ou économe)."
+          hint="Tu peux sélectionner plusieurs CSV à la fois (ex. les 6 derniers mois)."
+          multiple
+          loading={loading}
+          error={error}
+          onContinue={handlePastFiles}
+        />
+      ) : !txs ? (
+        <CsvStepDropZone
+          step={2}
+          title="Dépose le relevé du mois actuel"
+          description="Ce relevé (un seul fichier) sert au calcul de ton solde disponible et au camembert du budget de ce mois."
+          hint="Choisis le CSV correspondant au mois en cours, distinct de tes relevés précédents."
+          loading={loading}
+          error={error}
+          onContinue={handleCurrentFiles}
+          onBack={() => setPastTxs(null)}
+        />
+      ) : showDropZone ? (
         <DropZone
           {...{ dragOver, setDragOver, loading, error, onFiles: handleFiles, inputRef }}
-          onCancel={txs ? () => setShowDropZone(false) : undefined}
+          onCancel={() => setShowDropZone(false)}
+        />
+      ) : needsGoals ? (
+        <GoalsOnboarding
+          shortGoals={shortGoals}
+          longGoals={longGoals}
+          setShortGoals={setShortGoals}
+          setLongGoals={setLongGoals}
+          onContinue={() => setGoalsStepDone(true)}
         />
       ) : showIntro ? (
         <ProfileIntro
@@ -796,18 +963,18 @@ function AppDashboard() {
         <WalletPage
           which={walletOpen}
           onBack={() => setWalletOpen(null)}
-          data={data!}
+          currentData={currentData}
           shortGoals={shortGoals}
           longGoals={longGoals}
           setShortGoals={setShortGoals}
           setLongGoals={setLongGoals}
-          importedMonths={importedMonths}
         />
       ) : (
         <main className="relative z-10 max-w-5xl mx-auto px-5 space-y-6">
           {tab === "epargne" && (
             <EpargneTab
               data={data!}
+              currentData={currentData}
               onOpen={setWalletOpen}
               shortGoals={shortGoals}
               longGoals={longGoals}
@@ -819,6 +986,18 @@ function AppDashboard() {
             />
           )}
           {tab === "stats" && <StatsTab data={data!} shortGoals={shortGoals} longGoals={longGoals} />}
+          {tab === "analyse" && (
+            <AnalyseTab
+              data={data!}
+              currentData={currentData}
+              advice={budgetAdvice}
+              loading={budgetAdviceLoading}
+              onRefresh={() => {
+                setBudgetAdvice(null);
+                void fetchBudgetAdvice();
+              }}
+            />
+          )}
           {tab === "formation" && <FormationTab />}
           {tab === "compte" && (
             <CompteTab
@@ -832,10 +1011,12 @@ function AppDashboard() {
         </main>
       )}
 
-      {txs && !walletOpen && !showIntro && <BottomNav tab={tab} setTab={setTab} />}
+      {txs && !walletOpen && !needsGoals && !showIntro && !showDropZone && (
+        <BottomNav tab={tab} setTab={setTab} />
+      )}
 
       {/* Bouton de test : ajoute une dépense Fast-Food de 15€ et déclenche le conseil IA local */}
-      {txs && !walletOpen && !showIntro && (
+      {txs && !walletOpen && !needsGoals && !showIntro && !showDropZone && (
         <button
           onClick={handleDemoExpense}
           title="Tester : ajouter une dépense de 15€"
@@ -934,6 +1115,297 @@ function DropZone({
   );
 }
 
+// ---------- Étapes d'import CSV à l'onboarding (mois précédents puis mois actuel) ----------
+function CsvStepDropZone({
+  step,
+  title,
+  description,
+  hint,
+  multiple = true,
+  loading,
+  error,
+  onContinue,
+  onBack,
+}: {
+  step: 1 | 2;
+  title: string;
+  description: string;
+  hint?: string;
+  multiple?: boolean;
+  loading: boolean;
+  error: string | null;
+  onContinue: (files: File[]) => void;
+  onBack?: () => void;
+}) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function addFiles(list: FileList | File[]) {
+    const arr = Array.from(list);
+    setFiles((prev) => (multiple ? [...prev, ...arr] : arr));
+  }
+
+  function removeFile(i: number) {
+    setFiles((prev) => prev.filter((_, idx) => idx !== i));
+  }
+
+  return (
+    <main className="relative z-10 max-w-3xl mx-auto px-6 pt-10">
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          const f = e.dataTransfer.files;
+          if (f?.length) addFiles(f);
+        }}
+        className={`glass-strong rounded-3xl p-12 text-center transition-all ${dragOver ? "scale-[1.02] ring-2 ring-[var(--ember)]" : ""}`}
+      >
+        <img
+          src={foxAdvisor}
+          alt=""
+          className="size-32 object-contain mx-auto mb-6 animate-float"
+        />
+        <div className="text-[10px] uppercase tracking-[0.2em] text-white/60 mb-2">
+          Étape {step}/2
+        </div>
+        <h1 className="text-3xl font-display font-bold mb-2">{title}</h1>
+        <p className="text-muted-foreground mb-6 inline-flex items-center gap-1.5 justify-center text-center">
+          <Lock className="size-3.5 shrink-0" /> {description}
+        </p>
+        {hint && <p className="text-xs text-white/50 mb-4">{hint}</p>}
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".csv,text/csv"
+          multiple={multiple}
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files;
+            if (f?.length) addFiles(f);
+            e.target.value = "";
+          }}
+        />
+        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+          <button
+            onClick={() => inputRef.current?.click()}
+            className="liquid-tab px-6 py-3 inline-flex items-center gap-2 font-medium"
+          >
+            <Upload className="size-4" /> {multiple ? "Choisir un ou plusieurs CSV" : "Choisir un CSV"}
+          </button>
+          {onBack && (
+            <button
+              onClick={onBack}
+              className="rounded-full px-6 py-3 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1.5 justify-center"
+            >
+              <ArrowLeft className="size-4" /> Précédent
+            </button>
+          )}
+          <button
+            onClick={() => onContinue(files)}
+            disabled={!files.length || loading}
+            className="liquid-tab px-6 py-3 inline-flex items-center gap-2 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Suivant <ArrowRight className="size-4" />
+          </button>
+        </div>
+        {files.length > 0 && (
+          <ul className="mt-5 space-y-1.5 text-left max-w-md mx-auto">
+            {files.map((f, i) => (
+              <li
+                key={`${f.name}-${i}`}
+                className="flex items-center justify-between gap-2 glass rounded-xl px-3 py-1.5 text-sm"
+              >
+                <span className="truncate">{f.name}</span>
+                <button
+                  onClick={() => removeFile(i)}
+                  className="text-white/50 hover:text-white shrink-0"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {loading && <p className="mt-6 text-sm text-muted-foreground">Analyse en cours…</p>}
+        {error && <p className="mt-6 text-sm text-destructive">{error}</p>}
+      </div>
+    </main>
+  );
+}
+
+// ---------- Onboarding : au moins 1 objectif d'épargne avant d'entrer dans le tableau de bord ----------
+const EMPTY_ONBOARD_GOAL = { name: "", target: 0, deadline: "", saved: 0 };
+
+function GoalsOnboarding({
+  shortGoals,
+  longGoals,
+  setShortGoals,
+  setLongGoals,
+  onContinue,
+}: {
+  shortGoals: SavingsGoal[];
+  longGoals: SavingsGoal[];
+  setShortGoals: (v: SavingsGoal[]) => void;
+  setLongGoals: (v: SavingsGoal[]) => void;
+  onContinue: () => void;
+}) {
+  const [kind, setKind] = useState<"short" | "long">("short");
+  const [form, setForm] = useState(EMPTY_ONBOARD_GOAL);
+  const total = shortGoals.length + longGoals.length;
+
+  function addGoal() {
+    if (!form.name.trim()) return;
+    const goals = kind === "short" ? shortGoals : longGoals;
+    const set = kind === "short" ? setShortGoals : setLongGoals;
+    set([...goals, { id: `goal-${Date.now()}`, ...form, pinned: goals.length === 0 }]);
+    setForm(EMPTY_ONBOARD_GOAL);
+  }
+
+  function removeGoal(k: "short" | "long", id: string) {
+    if (k === "short") setShortGoals(shortGoals.filter((g) => g.id !== id));
+    else setLongGoals(longGoals.filter((g) => g.id !== id));
+  }
+
+  return (
+    <main className="relative z-10 max-w-2xl mx-auto px-5 pt-6 space-y-6">
+      <section className="glass-strong rounded-3xl p-8 text-center">
+        <img
+          src={foxAdvisor}
+          alt=""
+          className="size-20 object-contain mx-auto mb-4 animate-float"
+        />
+        <div className="text-[10px] uppercase tracking-[0.2em] text-white/60">Dernière étape</div>
+        <h1 className="font-display text-xl sm:text-2xl font-semibold mt-2 text-white">
+          Définis ton premier objectif d'épargne
+        </h1>
+        <p className="text-sm text-white/70 mt-3 max-w-md mx-auto">
+          Ajoute au moins un objectif, à courte ou longue durée, pour que le Renard puisse
+          t'accompagner vers ton budget idéal.
+        </p>
+      </section>
+
+      <section className="glass-strong rounded-3xl p-6 space-y-4">
+        <div className="grid sm:grid-cols-2 gap-3">
+          {[
+            { id: "short" as const, label: "Épargne à courte durée", color: "#e94560" },
+            { id: "long" as const, label: "Épargne à longue durée", color: "#a83bb3" },
+          ].map((opt) => {
+            const active = kind === opt.id;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => setKind(opt.id)}
+                className={`text-left rounded-2xl p-4 transition-all border ${active ? "border-white/40 scale-[1.01]" : "border-white/10 hover:border-white/25"}`}
+                style={{
+                  background: active
+                    ? `linear-gradient(135deg, color-mix(in oklab, ${opt.color} 25%, transparent), rgba(255,255,255,0.04))`
+                    : "rgba(255,255,255,0.03)",
+                }}
+              >
+                <div className="font-display font-bold" style={{ color: opt.color }}>
+                  {opt.label}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="grid sm:grid-cols-3 gap-3">
+          <label className="block">
+            <span className="text-xs text-white/70">Nom de l'objectif</span>
+            <input
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="Ex: Vacances, Apport appart..."
+              className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-white/70">Montant cible (€)</span>
+            <input
+              type="number"
+              value={form.target}
+              onChange={(e) =>
+                setForm({ ...form, target: e.target.value === "" ? 0 : +e.target.value })
+              }
+              className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-white/70">Échéance</span>
+            <input
+              type="date"
+              value={form.deadline}
+              onChange={(e) => setForm({ ...form, deadline: e.target.value })}
+              className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
+            />
+          </label>
+        </div>
+        <label className="block">
+          <span className="text-xs text-white/70">Déjà épargné (€)</span>
+          <input
+            type="number"
+            value={form.saved}
+            onChange={(e) =>
+              setForm({ ...form, saved: e.target.value === "" ? 0 : +e.target.value })
+            }
+            className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
+          />
+        </label>
+
+        <button
+          onClick={addGoal}
+          className="liquid-tab px-5 py-2.5 font-medium inline-flex items-center gap-2"
+        >
+          <Target className="size-4" /> Ajouter l'objectif
+        </button>
+      </section>
+
+      {total > 0 && (
+        <section className="glass-strong rounded-3xl p-6 space-y-2">
+          <h2 className="text-sm font-semibold text-white/80">Tes objectifs</h2>
+          {[
+            ...shortGoals.map((g) => ({ ...g, kind: "short" as const })),
+            ...longGoals.map((g) => ({ ...g, kind: "long" as const })),
+          ].map((g) => (
+            <div
+              key={g.id}
+              className="glass rounded-2xl px-4 py-2.5 flex items-center justify-between gap-2 text-sm"
+            >
+              <span>
+                {g.name || "Objectif sans nom"}{" "}
+                <span className="text-white/50">
+                  ({g.kind === "short" ? "court terme" : "long terme"})
+                </span>
+              </span>
+              <button
+                onClick={() => removeGoal(g.kind, g.id)}
+                className="text-destructive/80 hover:text-destructive text-xs"
+              >
+                Supprimer
+              </button>
+            </div>
+          ))}
+        </section>
+      )}
+
+      <button
+        disabled={total === 0}
+        onClick={onContinue}
+        className="liquid-tab w-full px-6 py-3 font-medium inline-flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Continuer vers mon tableau de bord <ArrowRight className="size-4" />
+      </button>
+    </main>
+  );
+}
+
 // ---------- Wallet Card (the “portefeuille”) ----------
 function WalletCard({
   label,
@@ -989,6 +1461,7 @@ function WalletCard({
 // ---------- Épargne tab (3 portefeuilles + Budget + objectifs + opérations) ----------
 function EpargneTab({
   data,
+  currentData,
   onOpen,
   shortGoals,
   longGoals,
@@ -999,6 +1472,7 @@ function EpargneTab({
   streak,
 }: {
   data: Computed;
+  currentData: Computed;
   onOpen: (w: "courant" | "court" | "long") => void;
   shortGoals: SavingsGoal[];
   longGoals: SavingsGoal[];
@@ -1008,7 +1482,8 @@ function EpargneTab({
   onApplyInsight: () => void;
   streak: number;
 }) {
-  const courant = Math.round(data.income - data.expense);
+  // Solde "Dépenses courantes" calculé uniquement à partir du relevé du mois actuel.
+  const courant = Math.round(currentData.income - currentData.expense);
   const shortSaved = shortGoals.reduce((s, g) => s + g.saved, 0);
   const longSaved = longGoals.reduce((s, g) => s + g.saved, 0);
   const shortPinned = pinnedOrFirst(shortGoals);
@@ -1055,7 +1530,7 @@ function EpargneTab({
         onApply={onApplyInsight}
       />
 
-      <BudgetPie data={data} shortGoals={shortGoals} longGoals={longGoals} />
+      <BudgetPie data={currentData} shortGoals={shortGoals} longGoals={longGoals} />
 
       <ObjectifsSection shortGoals={shortGoals} longGoals={longGoals} />
 
@@ -1300,21 +1775,19 @@ function ObjectifsSection({
 function WalletPage({
   which,
   onBack,
-  data,
+  currentData,
   shortGoals,
   longGoals,
   setShortGoals,
   setLongGoals,
-  importedMonths,
 }: {
   which: "courant" | "court" | "long";
   onBack: () => void;
-  data: Computed;
+  currentData: Computed;
   shortGoals: SavingsGoal[];
   longGoals: SavingsGoal[];
   setShortGoals: (v: SavingsGoal[]) => void;
   setLongGoals: (v: SavingsGoal[]) => void;
-  importedMonths: number | null;
 }) {
   return (
     <main className="relative z-10 max-w-3xl mx-auto px-5">
@@ -1324,7 +1797,7 @@ function WalletPage({
       >
         <ArrowLeft className="size-4" /> Retour aux portefeuilles
       </button>
-      {which === "courant" && <CurrentWalletDetail data={data} importedMonths={importedMonths} />}
+      {which === "courant" && <CurrentWalletDetail data={currentData} />}
       {which === "court" && (
         <SavingsGoalPage which="short" goals={shortGoals} setGoals={setShortGoals} />
       )}
@@ -1335,13 +1808,7 @@ function WalletPage({
   );
 }
 
-function CurrentWalletDetail({
-  data,
-  importedMonths,
-}: {
-  data: Computed;
-  importedMonths: number | null;
-}) {
+function CurrentWalletDetail({ data }: { data: Computed }) {
   const courant = Math.round(data.income - data.expense);
   return (
     <div
@@ -1360,9 +1827,9 @@ function CurrentWalletDetail({
       >
         {fmt(courant)}
       </div>
-      {importedMonths !== null && importedMonths > 1 && (
+      {data.months.length > 1 && (
         <p className="text-xs text-white/55">
-          Ces chiffres représentent {importedMonths} mois de relevés importés.
+          Ces chiffres représentent {data.months.length} mois de relevés importés.
         </p>
       )}
       <div className="grid grid-cols-2 gap-3 text-sm">
@@ -1591,6 +2058,94 @@ function SavingsGoalPage({
   );
 }
 
+// ---------- Analyse tab : "Conseil du Renard", budget du mois prochain via /api/budget-advice ----------
+function AnalyseTab({
+  data,
+  currentData,
+  advice,
+  loading,
+  onRefresh,
+}: {
+  data: Computed;
+  currentData: Computed;
+  advice: BudgetAdvice | null;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <>
+      <section className="glass-strong rounded-3xl p-6">
+        <div className="flex items-start gap-4">
+          <img src={foxAdvisor} alt="" className="size-16 object-contain shrink-0 animate-float" />
+          <div>
+            <div className="text-[10px] uppercase tracking-widest text-[var(--ember-glow)] inline-flex items-center gap-1.5">
+              <Sparkles className="size-3.5" /> Conseil du Renard
+            </div>
+            <h2 className="font-display text-xl font-bold mt-1">
+              {advice ? advice.titre : "Ton budget pour le mois prochain"}
+            </h2>
+          </div>
+        </div>
+        <p className="text-sm text-white/75 mt-3 leading-relaxed">
+          {loading
+            ? "Le Renard prépare ton budget pour le mois prochain…"
+            : advice
+              ? advice.message
+              : "Demande au Renard de te proposer un budget pour le mois prochain et des pistes pour réduire tes dépenses, en fonction de tes objectifs d'épargne."}
+        </p>
+        <button
+          onClick={onRefresh}
+          disabled={loading}
+          className="liquid-tab mt-4 px-5 py-2.5 font-medium inline-flex items-center gap-2 disabled:opacity-50"
+        >
+          <Sparkles className="size-4" /> {advice ? "Régénérer le conseil" : "Obtenir mon budget conseillé"}
+        </button>
+      </section>
+
+      {advice && advice.budget.length > 0 && (
+        <section className="glass-strong rounded-3xl p-6">
+          <h3 className="font-display text-lg font-bold mb-3">Budget conseillé pour le mois prochain</h3>
+          <ul className="space-y-2">
+            {advice.budget.map((b) => {
+              const current = currentData.currentMonth[b.categorie as BudgetCat] ?? 0;
+              const color = CAT_COLORS[b.categorie as BudgetCat] ?? "#8a8a8a";
+              return (
+                <li
+                  key={b.categorie}
+                  className="flex items-center justify-between text-sm glass rounded-2xl px-4 py-3"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <span className="size-2.5 rounded-full" style={{ background: color }} />
+                    {b.categorie}
+                  </span>
+                  <span className="font-mono text-right">
+                    <span className="text-white/50 mr-2">ce mois : {fmt(current)}</span>
+                    <span className="font-bold text-[var(--ember-glow)]">{fmt(b.montant)}</span>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
+      {advice && advice.conseils.length > 0 && (
+        <section className="glass-strong rounded-3xl p-6">
+          <h3 className="font-display text-lg font-bold mb-3">Pistes pour réduire tes dépenses</h3>
+          <ul className="space-y-2">
+            {advice.conseils.map((c, i) => (
+              <li key={i} className="text-sm text-white/80 flex items-start gap-2">
+                <ArrowRight className="size-3.5 mt-0.5 shrink-0 text-[var(--ember-glow)]" />
+                {c}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
+  );
+}
+
 // ---------- Stats tab : lignes liquid glass par mois ----------
 function StatsTab({
   data,
@@ -1734,7 +2289,7 @@ function MonthStatRow({
   longGoals: SavingsGoal[];
 }) {
   const [open, setOpen] = useState(false);
-  const pct = (m.saved / maxSaved) * 100;
+  const pct = Math.max(0, (m.saved / maxSaved) * 100);
 
   // Pour le camembert : zones prédéfinies = baseline globale (référence), consommé = cats du mois
   // + zones épargne court/long avec leur cible mensuelle et "filled" = épargné ce mois-là
@@ -2726,6 +3281,7 @@ function BottomNav({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) 
   const items = [
     { id: "epargne", label: "Épargne", icon: PiggyBank },
     { id: "stats", label: "Stats", icon: BarChart3 },
+    { id: "analyse", label: "Conseil", icon: Sparkles },
     { id: "formation", label: "Formation", icon: GraduationCap },
     { id: "compte", label: "Compte", icon: User },
   ] as const satisfies { id: TabId; label: string; icon: typeof PiggyBank }[];
