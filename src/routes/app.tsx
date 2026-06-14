@@ -2367,7 +2367,7 @@ function MonthStatRow({
           <div className="text-right">
             <div className="text-[10px] uppercase tracking-widest text-white/50">Épargné</div>
             <div className="font-display font-bold text-xl text-[var(--ember-glow)]">
-              {Math.round(m.saved)}€
+              {Math.round(split.short + split.long)}€
             </div>
           </div>
           <ArrowRight
