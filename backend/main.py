@@ -228,7 +228,7 @@ def build_transactions(df: pd.DataFrame) -> list[dict]:
     return transactions
 
 
-OLLAMA_MODEL = "llama3.2:3b"
+OLLAMA_MODEL = "qwen2.5:7b"
 # Garde le modèle chargé en mémoire entre deux requêtes : sur CPU, le rechargement
 # du modèle est souvent le principal poste de latence.
 OLLAMA_KEEP_ALIVE = "30m"

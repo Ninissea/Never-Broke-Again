@@ -2,6 +2,9 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { parseCsv, type Transaction } from "@/lib/csv-engine";
 import foxAdvisor from "@/assets/fox-advisor.png";
+import foxDepensier from "@/assets/Renard_depensier.png";
+import foxEconome from "@/assets/Renard_Econome.png";
+import foxRaisonnable from "@/assets/Renard_raisonnable.png";
 
 import {
   Upload,
@@ -19,6 +22,8 @@ import {
   Bell,
   Calendar,
   Flame,
+  Check,
+  X,
 } from "lucide-react";
 
 export const Route = createFileRoute("/app")({
@@ -32,10 +37,9 @@ export const Route = createFileRoute("/app")({
 });
 
 // ---------- Types & helpers ----------
-type BudgetCat = "Loyer" | "Nourriture" | "Transport" | "Loisirs" | "Shopping" | "Autre";
+type BudgetCat = "Nourriture" | "Transport" | "Loisirs" | "Shopping" | "Autre";
 
 const CAT_COLORS: Record<BudgetCat, string> = {
-  Loyer: "#e94560",
   Nourriture: "#3b9eff",
   Transport: "#52b04a",
   Loisirs: "#f0a020",
@@ -43,11 +47,13 @@ const CAT_COLORS: Record<BudgetCat, string> = {
   Autre: "#8a8a8a",
 };
 
+// Le loyer (et les autres charges fixes) sont gérés séparément du budget piloté :
+// ils sont déduits directement du revenu disponible (voir fixedChargesMonthlyTotal).
 function mapToBudgetCat(t: Transaction): BudgetCat | null {
   if (t.amount >= 0) return null;
   switch (t.category) {
     case "Loyer & Charges":
-      return "Loyer";
+      return null;
     case "Courses":
     case "Restaurants & Bars":
       return "Nourriture";
@@ -63,28 +69,41 @@ function mapToBudgetCat(t: Transaction): BudgetCat | null {
   }
 }
 
-type Goal = { name: string; target: number; deadline: string; saved: number };
+type SavingsGoal = {
+  id: string;
+  name: string;
+  target: number;
+  deadline: string;
+  saved: number;
+  pinned: boolean;
+};
 type SelfDef = "pleasure" | "restrict";
 type SpenderProfile = "depensier" | "raisonnable" | "econome";
 type TabId = "epargne" | "stats" | "formation" | "compte";
 type InsightData = { titre: string; message: string; montant: number; potCible: string };
 
 const LS_KEYS = {
-  shortGoal: "nba.shortGoal",
-  longGoal: "nba.longGoal",
+  shortGoals: "nba.shortGoals",
+  longGoals: "nba.longGoals",
   selfDef: "nba.selfDef",
 };
 
 const PROFILE_LABEL: Record<SpenderProfile, string> = {
-  depensier: "Je suis un dépensier",
-  raisonnable: "Je suis raisonnable",
-  econome: "Je suis économe",
+  depensier: "Renard dépensier",
+  raisonnable: "Renard raisonnable",
+  econome: "Renard économe",
 };
 
 const PROFILE_COLOR: Record<SpenderProfile, string> = {
   depensier: "#e94560",
   raisonnable: "#3b9eff",
   econome: "#52b04a",
+};
+
+const PROFILE_IMAGE: Record<SpenderProfile, string> = {
+  depensier: foxDepensier,
+  econome: foxEconome,
+  raisonnable: foxRaisonnable,
 };
 
 function detectProfile(income: number, expense: number): SpenderProfile {
@@ -117,47 +136,65 @@ function useLS<T>(key: string, initial: T): [T, (v: T) => void] {
 }
 
 function fmt(n: number) {
-  return n >= 1000 ? `${(n / 1000).toFixed(1).replace(".", ",")}k€` : `${Math.round(n)}€`;
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "-" : "";
+  return abs >= 1000 ? `${sign}${(abs / 1000).toFixed(1).replace(".", ",")}k€` : `${Math.round(n)}€`;
 }
 
-// ISO week key
-function weekKey(d: Date) {
-  const dt = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const day = dt.getUTCDay() || 7;
-  dt.setUTCDate(dt.getUTCDate() + 4 - day);
-  const yearStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
-  const week = Math.ceil(((+dt - +yearStart) / 86400000 + 1) / 7);
-  return `${dt.getUTCFullYear()}-S${String(week).padStart(2, "0")}`;
+// Liste d'objectifs d'épargne (court/long terme). Par défaut, aucun objectif n'est présent :
+// l'utilisateur les crée lui-même depuis ses portefeuilles d'épargne.
+function useGoalsLS(key: string): [SavingsGoal[], (v: SavingsGoal[]) => void] {
+  const [v, setV] = useState<SavingsGoal[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const set = (nv: SavingsGoal[]) => {
+    setV(nv);
+    try {
+      localStorage.setItem(key, JSON.stringify(nv));
+    } catch {
+      // quota dépassé ou stockage indisponible : on garde l'état en mémoire seulement
+    }
+  };
+  return [v, set];
 }
 
-function weekRange(key: string): string {
-  // returns e.g. "12–18 mai"
-  const [y, s] = key.split("-S");
-  const simple = new Date(Date.UTC(+y, 0, 1 + (+s - 1) * 7));
-  const day = simple.getUTCDay() || 7;
-  const monday = new Date(simple);
-  monday.setUTCDate(simple.getUTCDate() - day + 1);
-  const sunday = new Date(monday);
-  sunday.setUTCDate(monday.getUTCDate() + 6);
-  const m = [
-    "jan",
-    "fév",
-    "mar",
-    "avr",
-    "mai",
-    "juin",
-    "juil",
-    "août",
-    "sept",
-    "oct",
-    "nov",
-    "déc",
-  ];
-  return `${monday.getUTCDate()}–${sunday.getUTCDate()} ${m[sunday.getUTCMonth()]}`;
+// Clé "YYYY-MM" identifiant le mois d'une transaction.
+function monthKey(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+const MONTH_NAMES = [
+  "Janvier",
+  "Février",
+  "Mars",
+  "Avril",
+  "Mai",
+  "Juin",
+  "Juillet",
+  "Août",
+  "Septembre",
+  "Octobre",
+  "Novembre",
+  "Décembre",
+];
+
+function monthLabel(key: string): string {
+  const [y, m] = key.split("-");
+  return `${MONTH_NAMES[+m - 1]} ${y}`;
+}
+
+function daysInMonth(year: number, month0: number): number {
+  return new Date(year, month0 + 1, 0).getDate();
 }
 
 // ---------- Computed dashboard data ----------
-type WeekRow = {
+type MonthRow = {
   key: string;
   label: string;
   saved: number;
@@ -169,20 +206,19 @@ type WeekRow = {
 type Computed = {
   income: number;
   expense: number;
-  net: number;
   recent: Transaction[];
   baseline: Record<BudgetCat, number>;
-  weeklyBudget: Record<BudgetCat, number>;
-  weeklyDisposable: number;
-  currentWeek: Record<BudgetCat, number>;
-  currentWeekSaved: number;
-  currentWeekDow: number;
-  weeks: WeekRow[];
+  monthlyBudget: Record<BudgetCat, number>;
+  monthlyDisposable: number;
+  currentMonth: Record<BudgetCat, number>;
+  currentMonthSaved: number;
+  currentMonthDay: number;
+  currentMonthDays: number;
+  months: MonthRow[];
   streak: number;
 };
 
 const emptyCats = (): Record<BudgetCat, number> => ({
-  Loyer: 0,
   Nourriture: 0,
   Transport: 0,
   Loisirs: 0,
@@ -197,6 +233,21 @@ function normalizeLabel(label: string): string {
     .trim()
     .toUpperCase()
     .slice(0, 32);
+}
+
+// Fusionne un nouvel import de transactions avec l'historique déjà importé, en ignorant
+// les doublons (même date + libellé + montant) afin de pouvoir charger plusieurs relevés
+// au fil du temps sans perdre ni dupliquer l'analyse précédente.
+function mergeTransactions(existing: Transaction[], incoming: Transaction[]): Transaction[] {
+  const seen = new Set(existing.map((t) => `${t.date.getTime()}|${t.label}|${t.amount}`));
+  const additions: Transaction[] = [];
+  for (const t of incoming) {
+    const sig = `${t.date.getTime()}|${t.label}|${t.amount}`;
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    additions.push({ ...t, id: `tx-${existing.length + additions.length}-${sig}` });
+  }
+  return [...existing, ...additions].sort((a, b) => b.date.getTime() - a.date.getTime());
 }
 
 // Une charge fixe revient ~1x/mois avec un montant stable (loyer, abonnement...) ; un
@@ -234,34 +285,30 @@ function fixedChargeCandidates(txs: Transaction[]): {
   return { items, months: Math.max(1, months.size) };
 }
 
-// Nombre moyen de semaines par mois (52 / 12), pour convertir des montants mensuels en hebdomadaires.
-const WEEKS_PER_MONTH = 4.33;
-
 function compute(
   txs: Transaction[],
   fixedChargeLabels: Set<string> = new Set(),
   fixedChargesMonthlyTotal = 0,
-  weeklySavingsGoal = 0,
+  monthlySavingsGoal = 0,
 ): Computed {
   const income = txs.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
   const expense = txs.filter((t) => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
-  const net = Math.max(0, income - expense);
   const recent = [...txs].sort((a, b) => b.date.getTime() - a.date.getTime()).slice(0, 30);
 
-  // Le budget hebdomadaire (semaines, baseline, catégories) exclut les charges fixes mensuelles
+  // Le budget mensuel (mois, baseline, catégories) exclut les charges fixes mensuelles
   // (loyer, abonnements, assurances...) : elles ne sont pas pilotables au jour le jour.
-  const weeklyTxs = txs.filter((t) => !fixedChargeLabels.has(normalizeLabel(t.label)));
+  const budgetTxs = txs.filter((t) => !fixedChargeLabels.has(normalizeLabel(t.label)));
 
-  const byWeek = new Map<string, Transaction[]>();
-  for (const t of weeklyTxs) {
-    const k = weekKey(t.date);
-    if (!byWeek.has(k)) byWeek.set(k, []);
-    byWeek.get(k)!.push(t);
+  const byMonth = new Map<string, Transaction[]>();
+  for (const t of budgetTxs) {
+    const k = monthKey(t.date);
+    if (!byMonth.has(k)) byMonth.set(k, []);
+    byMonth.get(k)!.push(t);
   }
-  const sortedKeys = [...byWeek.keys()].sort();
+  const sortedKeys = [...byMonth.keys()].sort();
 
-  const weeks: WeekRow[] = sortedKeys.map((k) => {
-    const arr = byWeek.get(k)!;
+  const months: MonthRow[] = sortedKeys.map((k) => {
+    const arr = byMonth.get(k)!;
     const inc = arr.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
     const exp = arr.filter((t) => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
     const cats = emptyCats();
@@ -271,7 +318,7 @@ function compute(
     }
     return {
       key: k,
-      label: weekRange(k),
+      label: monthLabel(k),
       income: inc,
       spent: exp,
       saved: Math.max(0, inc - exp),
@@ -282,7 +329,7 @@ function compute(
   const baseline = emptyCats();
   const pastKeys = sortedKeys.slice(0, -1);
   for (const k of pastKeys) {
-    for (const t of byWeek.get(k)!) {
+    for (const t of byMonth.get(k)!) {
       const c = mapToBudgetCat(t);
       if (!c) continue;
       baseline[c] += Math.abs(t.amount);
@@ -291,56 +338,55 @@ function compute(
   const n = Math.max(1, pastKeys.length);
   (Object.keys(baseline) as BudgetCat[]).forEach((c) => (baseline[c] = baseline[c] / n));
 
-  const currentWeek = emptyCats();
-  let currentWeekSaved = 0;
-  if (weeks.length > 0) {
-    Object.assign(currentWeek, weeks[weeks.length - 1].cats);
-    currentWeekSaved = weeks[weeks.length - 1].saved;
+  const currentMonth = emptyCats();
+  let currentMonthSaved = 0;
+  if (months.length > 0) {
+    Object.assign(currentMonth, months[months.length - 1].cats);
+    currentMonthSaved = months[months.length - 1].saved;
   }
-  if (pastKeys.length === 0) Object.assign(baseline, currentWeek);
+  if (pastKeys.length === 0) Object.assign(baseline, currentMonth);
 
-  // Budget hebdomadaire "plan" : ce qu'il reste chaque semaine une fois le salaire mensuel
-  // amputé des charges fixes et de l'objectif d'épargne, réparti entre catégories selon
-  // les proportions observées historiquement (baseline).
-  const txMonths = new Set(txs.map((t) => `${t.date.getFullYear()}-${t.date.getMonth()}`));
+  // Budget mensuel "plan" : ce qu'il reste chaque mois une fois le salaire amputé des charges
+  // fixes et de l'objectif d'épargne, réparti entre catégories selon les proportions observées
+  // historiquement (baseline).
+  const txMonths = new Set(txs.map((t) => monthKey(t.date)));
   const monthlyIncome = income / Math.max(1, txMonths.size);
-  const weeklyDisposable = Math.max(
-    0,
-    (monthlyIncome - fixedChargesMonthlyTotal) / WEEKS_PER_MONTH - weeklySavingsGoal,
-  );
+  const monthlyDisposable = Math.max(0, monthlyIncome - fixedChargesMonthlyTotal - monthlySavingsGoal);
   const baselineTotal = (Object.values(baseline) as number[]).reduce((s, v) => s + v, 0);
-  const weeklyBudget = emptyCats();
+  const monthlyBudget = emptyCats();
   (Object.keys(baseline) as BudgetCat[]).forEach((c) => {
-    weeklyBudget[c] = baselineTotal > 0 ? weeklyDisposable * (baseline[c] / baselineTotal) : 0;
+    monthlyBudget[c] = baselineTotal > 0 ? monthlyDisposable * (baseline[c] / baselineTotal) : 0;
   });
 
-  // Position dans la semaine en cours, basée sur la dernière transaction du relevé (et non
+  // Position dans le mois en cours, basée sur la dernière transaction du relevé (et non
   // la date du jour) : on simule comme si "aujourd'hui" était ce dernier jour connu.
-  let currentWeekDow = 1;
-  if (weeklyTxs.length > 0) {
-    const maxDate = weeklyTxs.reduce((max, t) => (t.date > max ? t.date : max), weeklyTxs[0].date);
-    currentWeekDow = maxDate.getDay() || 7;
+  let currentMonthDay = 1;
+  let currentMonthDays = 30;
+  if (budgetTxs.length > 0) {
+    const maxDate = budgetTxs.reduce((max, t) => (t.date > max ? t.date : max), budgetTxs[0].date);
+    currentMonthDay = maxDate.getDate();
+    currentMonthDays = daysInMonth(maxDate.getFullYear(), maxDate.getMonth());
   }
 
-  // Nombre de semaines consécutives (les plus récentes) où une épargne a été réalisée.
+  // Nombre de mois consécutifs (les plus récents) où une épargne a été réalisée.
   let streak = 0;
-  for (let i = weeks.length - 1; i >= 0; i--) {
-    if (weeks[i].saved > 0) streak++;
+  for (let i = months.length - 1; i >= 0; i--) {
+    if (months[i].saved > 0) streak++;
     else break;
   }
 
   return {
     income,
     expense,
-    net,
     recent,
     baseline,
-    weeklyBudget,
-    weeklyDisposable,
-    currentWeek,
-    currentWeekSaved,
-    currentWeekDow,
-    weeks,
+    monthlyBudget,
+    monthlyDisposable,
+    currentMonth,
+    currentMonthSaved,
+    currentMonthDay,
+    currentMonthDays,
+    months,
     streak,
   };
 }
@@ -412,10 +458,10 @@ function Donut({
 function buildSlices(
   cats: Record<BudgetCat, number>,
   consumed: Record<BudgetCat, number>,
-  savingsTarget: number,
-  savingsFilled: number,
+  savingsShort: { target: number; filled: number },
+  savingsLong: { target: number; filled: number },
 ): Slice[] {
-  const order: BudgetCat[] = ["Loyer", "Nourriture", "Transport", "Loisirs", "Shopping", "Autre"];
+  const order: BudgetCat[] = ["Nourriture", "Transport", "Loisirs", "Shopping", "Autre"];
   const out: Slice[] = order
     .filter((c) => cats[c] > 0.5)
     .map((c) => ({
@@ -424,29 +470,55 @@ function buildSlices(
       total: cats[c],
       filled: Math.min(cats[c], consumed[c] || 0),
     }));
-  if (savingsTarget > 0.5) {
+  if (savingsShort.target > 0.5) {
     out.push({
-      label: "Épargne",
-      color: "#ffb84d",
-      total: savingsTarget,
-      filled: Math.min(savingsTarget, Math.max(0, savingsFilled)),
+      label: "Épargne courte",
+      color: "#e94560",
+      total: savingsShort.target,
+      filled: Math.min(savingsShort.target, Math.max(0, savingsShort.filled)),
+    });
+  }
+  if (savingsLong.target > 0.5) {
+    out.push({
+      label: "Épargne longue",
+      color: "#a83bb3",
+      total: savingsLong.target,
+      filled: Math.min(savingsLong.target, Math.max(0, savingsLong.filled)),
     });
   }
   return out;
 }
 
-// Weekly savings target derived from user goals
-function weeklySavingsTarget(shortGoal: Goal, longGoal: Goal): number {
+// Objectif d'épargne mensuel dérivé des objectifs de l'utilisateur (somme sur tous les objectifs
+// d'une catégorie court/long terme).
+function monthlySavingsTarget(goals: SavingsGoal[]): number {
   const now = Date.now();
-  const perWeek = (g: Goal) => {
+  const perMonth = (g: SavingsGoal) => {
     if (!g.target || g.target <= g.saved) return 0;
     const remaining = g.target - g.saved;
-    if (!g.deadline) return remaining / 52;
+    if (!g.deadline) return remaining / 12;
     const ms = new Date(g.deadline).getTime() - now;
-    const weeksLeft = Math.max(1, Math.ceil(ms / (7 * 86400000)));
-    return remaining / weeksLeft;
+    const monthsLeft = Math.max(1, Math.ceil(ms / (30.44 * 86400000)));
+    return remaining / monthsLeft;
   };
-  return perWeek(shortGoal) + perWeek(longGoal);
+  return goals.reduce((s, g) => s + perMonth(g), 0);
+}
+
+// Répartit le montant épargné ce mois-ci entre les zones court/long du camembert :
+// la zone "court terme" se remplit en priorité, le surplus va sur le "long terme".
+function splitSavingsFilled(
+  saved: number,
+  shortTarget: number,
+  longTarget: number,
+): { short: number; long: number } {
+  const short = Math.min(saved, shortTarget);
+  const long = Math.min(Math.max(0, saved - short), longTarget);
+  return { short, long };
+}
+
+// L'objectif épinglé est mis en avant (carte, transferts automatiques) ; à défaut, le premier de la liste.
+function pinnedOrFirst(goals: SavingsGoal[]): SavingsGoal | null {
+  return goals.find((g) => g.pinned) ?? goals[0] ?? null;
 }
 
 // ---------- Root ----------
@@ -456,27 +528,23 @@ function AppDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  // Affiche la zone de dépôt par-dessus le tableau de bord existant, pour ajouter un
+  // nouveau relevé sans perdre l'analyse déjà importée (cf. handleFiles : fusion).
+  const [showDropZone, setShowDropZone] = useState(false);
   const [tab, setTab] = useState<TabId>("epargne");
   const [walletOpen, setWalletOpen] = useState<null | "courant" | "court" | "long">(null);
   const [introDone, setIntroDone] = useState(false);
   const [selfDef, setSelfDef] = useLS<SelfDef | null>(LS_KEYS.selfDef, null);
-  const [shortGoal, setShortGoal] = useLS<Goal>(LS_KEYS.shortGoal, {
-    name: "",
-    target: 0,
-    deadline: "",
-    saved: 0,
-  });
-  const [longGoal, setLongGoal] = useLS<Goal>(LS_KEYS.longGoal, {
-    name: "",
-    target: 0,
-    deadline: "",
-    saved: 0,
-  });
+  const [shortGoals, setShortGoals] = useGoalsLS(LS_KEYS.shortGoals);
+  const [longGoals, setLongGoals] = useGoalsLS(LS_KEYS.longGoals);
   const [insight, setInsight] = useState<InsightData | null>(null);
   const [insightLoading, setInsightLoading] = useState(false);
   // L'utilisateur applique manuellement le conseil du Renard (sinon il reste juste informatif).
   const [insightApplied, setInsightApplied] = useState(false);
   const [fixedCharges, setFixedCharges] = useState<{ libelle: string; montant: number }[]>([]);
+  // Nombre de fichiers CSV déposés lors de la 1ère importation : indique sur combien de mois
+  // portent les revenus affichés dans le portefeuille "Dépenses courantes".
+  const [importedMonths, setImportedMonths] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Demande au conseiller IA local de repérer les charges fixes mensuelles (loyer, abonnements...)
@@ -511,28 +579,32 @@ function AppDashboard() {
       try {
         const fileArr = Array.from(files);
         const parsedLists = await Promise.all(fileArr.map(parseCsv));
-        const parsed = parsedLists.flat().sort((a, b) => b.date.getTime() - a.date.getTime());
+        const parsed = parsedLists.flat();
         if (!parsed.length) {
           setError("Aucune transaction détectée.");
           setLoading(false);
           return;
         }
-        setTxs(parsed);
-        setIntroDone(false);
-        // Un nouveau relevé = nouvelle analyse : on repart d'une épargne à 0 et d'un
-        // conseil vierge (l'utilisateur ré-appliquera s'il le souhaite).
-        setShortGoal({ ...shortGoal, saved: 0 });
-        setLongGoal({ ...longGoal, saved: 0 });
-        setInsight(null);
-        setInsightApplied(false);
-        await fetchFixedCharges(parsed);
+        const isFirstImport = txs === null;
+        // On conserve l'historique : les nouveaux relevés sont fusionnés avec ceux déjà
+        // importés (sans doublons), plutôt que de remplacer l'analyse précédente.
+        const merged = mergeTransactions(txs ?? [], parsed);
+        setTxs(merged);
+        setImportedMonths((prev) => (prev ?? 0) + fileArr.length);
+        setShowDropZone(false);
+        if (isFirstImport) {
+          setIntroDone(false);
+          setInsight(null);
+          setInsightApplied(false);
+        }
+        await fetchFixedCharges(merged);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Erreur de lecture du fichier.");
       } finally {
         setLoading(false);
       }
     },
-    [fetchFixedCharges, shortGoal, longGoal, setShortGoal, setLongGoal],
+    [fetchFixedCharges, txs],
   );
 
   const fixedChargeLabels = useMemo(
@@ -543,14 +615,14 @@ function AppDashboard() {
     () => fixedCharges.reduce((s, c) => s + c.montant, 0),
     [fixedCharges],
   );
-  const weeklySavingsGoal = useMemo(
-    () => weeklySavingsTarget(shortGoal, longGoal),
-    [shortGoal, longGoal],
+  const monthlySavingsGoal = useMemo(
+    () => monthlySavingsTarget(shortGoals) + monthlySavingsTarget(longGoals),
+    [shortGoals, longGoals],
   );
   const data = useMemo(
     () =>
-      txs ? compute(txs, fixedChargeLabels, fixedChargesMonthlyTotal, weeklySavingsGoal) : null,
-    [txs, fixedChargeLabels, fixedChargesMonthlyTotal, weeklySavingsGoal],
+      txs ? compute(txs, fixedChargeLabels, fixedChargesMonthlyTotal, monthlySavingsGoal) : null,
+    [txs, fixedChargeLabels, fixedChargesMonthlyTotal, monthlySavingsGoal],
   );
   const detectedProfile = useMemo<SpenderProfile | null>(
     () => (data ? detectProfile(data.income, data.expense) : null),
@@ -607,16 +679,31 @@ function AppDashboard() {
     [],
   );
 
-  // Applique le conseil affiché : ajoute le montant suggéré à l'épargne court terme.
+  // Applique le conseil affiché : ajoute le montant suggéré à l'objectif épinglé (ou premier) de
+  // l'épargne court terme ; en crée un si aucun objectif n'existe encore.
   const applyInsight = useCallback(() => {
     if (!insight || insightApplied || insight.montant <= 0) return;
-    setShortGoal({
-      ...shortGoal,
-      name: shortGoal.name || insight.potCible,
-      saved: shortGoal.saved + insight.montant,
-    });
+    if (!shortGoals.length) {
+      setShortGoals([
+        {
+          id: `goal-${Date.now()}`,
+          name: insight.potCible,
+          target: 0,
+          deadline: "",
+          saved: insight.montant,
+          pinned: true,
+        },
+      ]);
+    } else {
+      const target = pinnedOrFirst(shortGoals)!;
+      setShortGoals(
+        shortGoals.map((g) =>
+          g.id === target.id ? { ...g, saved: g.saved + insight.montant } : g,
+        ),
+      );
+    }
     setInsightApplied(true);
-  }, [insight, insightApplied, shortGoal, setShortGoal]);
+  }, [insight, insightApplied, shortGoals, setShortGoals]);
 
   // À la fin de l'onboarding : envoie le profil + l'agrégat des 6 derniers mois au conseiller IA local.
   const handleProfileContinue = useCallback(
@@ -626,7 +713,7 @@ function AppDashboard() {
       if (!txs) return;
       const d = compute(txs);
       const balance = Math.max(0, Math.round(d.income - d.expense));
-      const potCible = shortGoal.name || "Cotisation WEI 2026";
+      const potCible = pinnedOrFirst(shortGoals)?.name || "Cotisation WEI 2026";
       const recent = d.recent.map((t) => ({
         label: t.label,
         amount: t.amount,
@@ -634,7 +721,7 @@ function AppDashboard() {
       }));
       await fetchInsight(balance, recent, potCible, choice);
     },
-    [txs, shortGoal, setSelfDef, fetchInsight],
+    [txs, shortGoals, setSelfDef, fetchInsight],
   );
 
   // Panneau de démo : simule une dépense Fast-Food de 15€ et interroge le conseiller IA local.
@@ -642,7 +729,7 @@ function AppDashboard() {
     if (!txs) return;
     // On date la transaction de démo au dernier jour connu du relevé (le "aujourd'hui" simulé),
     // pas à la date système réelle : sinon elle devient le nouveau jour le plus récent et fausse
-    // currentWeekDow (donc le budget de TOUTES les catégories, pas seulement Fast-Food).
+    // currentMonthDay (donc le budget de TOUTES les catégories, pas seulement Fast-Food).
     const simulatedToday = txs.reduce((max, t) => (t.date > max ? t.date : max), txs[0].date);
     const newTx: Transaction = {
       id: `tx-demo-${Date.now()}`,
@@ -656,14 +743,14 @@ function AppDashboard() {
 
     const updatedData = compute(updated);
     const balance = Math.max(0, Math.round(updatedData.income - updatedData.expense));
-    const potCible = shortGoal.name || "Cotisation WEI 2026";
+    const potCible = pinnedOrFirst(shortGoals)?.name || "Cotisation WEI 2026";
     const recent = updatedData.recent.map((t) => ({
       label: t.label,
       amount: t.amount,
       date: t.date.toISOString().slice(0, 10),
     }));
     await fetchInsight(balance, recent, potCible, selfDef);
-  }, [txs, shortGoal, selfDef, fetchInsight]);
+  }, [txs, shortGoals, selfDef, fetchInsight]);
 
   return (
     <div className="min-h-screen relative overflow-hidden pb-32">
@@ -684,9 +771,8 @@ function AppDashboard() {
         {txs && (
           <button
             onClick={() => {
-              setTxs(null);
               setWalletOpen(null);
-              setIntroDone(false);
+              setShowDropZone(true);
             }}
             className="text-xs text-muted-foreground hover:text-foreground"
           >
@@ -695,8 +781,11 @@ function AppDashboard() {
         )}
       </header>
 
-      {!txs ? (
-        <DropZone {...{ dragOver, setDragOver, loading, error, onFiles: handleFiles, inputRef }} />
+      {!txs || showDropZone ? (
+        <DropZone
+          {...{ dragOver, setDragOver, loading, error, onFiles: handleFiles, inputRef }}
+          onCancel={txs ? () => setShowDropZone(false) : undefined}
+        />
       ) : showIntro ? (
         <ProfileIntro
           detected={detectedProfile!}
@@ -708,10 +797,11 @@ function AppDashboard() {
           which={walletOpen}
           onBack={() => setWalletOpen(null)}
           data={data!}
-          shortGoal={shortGoal}
-          longGoal={longGoal}
-          setShortGoal={setShortGoal}
-          setLongGoal={setLongGoal}
+          shortGoals={shortGoals}
+          longGoals={longGoals}
+          setShortGoals={setShortGoals}
+          setLongGoals={setLongGoals}
+          importedMonths={importedMonths}
         />
       ) : (
         <main className="relative z-10 max-w-5xl mx-auto px-5 space-y-6">
@@ -719,8 +809,8 @@ function AppDashboard() {
             <EpargneTab
               data={data!}
               onOpen={setWalletOpen}
-              shortGoal={shortGoal}
-              longGoal={longGoal}
+              shortGoals={shortGoals}
+              longGoals={longGoals}
               insight={insight}
               insightLoading={insightLoading}
               insightApplied={insightApplied}
@@ -728,7 +818,7 @@ function AppDashboard() {
               streak={data!.streak}
             />
           )}
-          {tab === "stats" && <StatsTab data={data!} shortGoal={shortGoal} longGoal={longGoal} />}
+          {tab === "stats" && <StatsTab data={data!} shortGoals={shortGoals} longGoals={longGoals} />}
           {tab === "formation" && <FormationTab />}
           {tab === "compte" && (
             <CompteTab
@@ -766,6 +856,7 @@ function DropZone({
   error,
   onFiles,
   inputRef,
+  onCancel,
 }: {
   dragOver: boolean;
   setDragOver: (v: boolean) => void;
@@ -773,6 +864,7 @@ function DropZone({
   error: string | null;
   onFiles: (files: FileList | File[]) => void;
   inputRef: RefObject<HTMLInputElement | null>;
+  onCancel?: () => void;
 }) {
   return (
     <main className="relative z-10 max-w-3xl mx-auto px-6 pt-10">
@@ -821,7 +913,20 @@ function DropZone({
           >
             <Upload className="size-4" /> Choisir un ou plusieurs CSV
           </button>
+          {onCancel && (
+            <button
+              onClick={onCancel}
+              className="rounded-full px-6 py-3 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Annuler
+            </button>
+          )}
         </div>
+        {onCancel && (
+          <p className="text-xs text-white/50 mt-4">
+            Les nouveaux relevés seront ajoutés à l'analyse déjà en cours, sans rien effacer.
+          </p>
+        )}
         {loading && <p className="mt-6 text-sm text-muted-foreground">Analyse en cours…</p>}
         {error && <p className="mt-6 text-sm text-destructive">{error}</p>}
       </div>
@@ -831,12 +936,14 @@ function DropZone({
 
 // ---------- Wallet Card (the “portefeuille”) ----------
 function WalletCard({
+  label,
   title,
   subtitle,
   amount,
   accent,
   onClick,
 }: {
+  label: string;
   title: string;
   subtitle: string;
   amount: number;
@@ -860,12 +967,17 @@ function WalletCard({
       <div className="relative flex items-start justify-between gap-3">
         <div>
           <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-white/70">
-            <Wallet className="size-3.5" /> Portefeuille
+            <Wallet className="size-3.5" /> {label}
           </div>
           <div className="mt-2 font-display font-bold text-lg leading-tight">{title}</div>
           <div className="text-xs text-white/60 mt-0.5">{subtitle}</div>
         </div>
-        <ArrowRight className="size-4 opacity-50 group-hover:opacity-100 group-hover:translate-x-0.5 transition" />
+        <div className="flex flex-col items-end gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-white/50 glass rounded-full px-2 py-0.5">
+            Ce mois
+          </span>
+          <ArrowRight className="size-4 opacity-50 group-hover:opacity-100 group-hover:translate-x-0.5 transition" />
+        </div>
       </div>
       <div className="relative mt-6 font-display text-3xl font-bold" style={{ color: accent }}>
         {fmt(amount)}
@@ -878,8 +990,8 @@ function WalletCard({
 function EpargneTab({
   data,
   onOpen,
-  shortGoal,
-  longGoal,
+  shortGoals,
+  longGoals,
   insight,
   insightLoading,
   insightApplied,
@@ -888,42 +1000,49 @@ function EpargneTab({
 }: {
   data: Computed;
   onOpen: (w: "courant" | "court" | "long") => void;
-  shortGoal: Goal;
-  longGoal: Goal;
+  shortGoals: SavingsGoal[];
+  longGoals: SavingsGoal[];
   insight: InsightData | null;
   insightLoading: boolean;
   insightApplied: boolean;
   onApplyInsight: () => void;
   streak: number;
 }) {
-  const courant = Math.max(0, Math.round(data.income - data.expense));
+  const courant = Math.round(data.income - data.expense);
+  const shortSaved = shortGoals.reduce((s, g) => s + g.saved, 0);
+  const longSaved = longGoals.reduce((s, g) => s + g.saved, 0);
+  const shortPinned = pinnedOrFirst(shortGoals);
+  const longPinned = pinnedOrFirst(longGoals);
 
   return (
     <>
       <div className="glass inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium">
         <Flame className="size-3.5 text-[var(--ember)]" /> Streak :{" "}
-        <span className="font-bold">{streak} semaines</span>
+        <span className="font-bold">{streak} mois</span>
       </div>
 
       <section className="grid sm:grid-cols-3 gap-4">
         <WalletCard
-          title="Dépenses courantes"
+          label="Dépenses courantes"
+          title="Solde disponible"
           subtitle="Ton compte du quotidien"
           amount={courant}
-          accent="#52b04a"
+          accent={courant < 0 ? "#e94560" : "#52b04a"}
           onClick={() => onOpen("courant")}
         />
         <WalletCard
-          title="Épargne à courte durée"
-          subtitle={shortGoal.name || "Définis ton objectif"}
-          amount={shortGoal.saved}
+          label="Épargne à courte durée"
+          title={shortPinned?.name || "Définis ton objectif"}
+          subtitle={`${shortGoals.length} objectif${shortGoals.length === 1 ? "" : "s"}`}
+          amount={shortSaved}
           accent="#e94560"
           onClick={() => onOpen("court")}
         />
         <WalletCard
-          title="Épargne à longue durée"
-          subtitle={longGoal.name || "Définis ton objectif"}
-          amount={longGoal.saved}
+          label="Épargne à longue durée"
+          title={longPinned?.name || "Définis ton objectif"}
+          subtitle={`${longGoals.length} objectif${longGoals.length === 1 ? "" : "s"}`}
+          amount={longSaved}
           accent="#a83bb3"
           onClick={() => onOpen("long")}
         />
@@ -936,9 +1055,9 @@ function EpargneTab({
         onApply={onApplyInsight}
       />
 
-      <BudgetPie data={data} shortGoal={shortGoal} longGoal={longGoal} />
+      <BudgetPie data={data} shortGoals={shortGoals} longGoals={longGoals} />
 
-      <ObjectifsSection shortGoal={shortGoal} longGoal={longGoal} />
+      <ObjectifsSection shortGoals={shortGoals} longGoals={longGoals} />
 
       <section className="glass-strong rounded-3xl p-6">
         <h2 className="font-display text-2xl font-bold mb-4">Dernières opérations</h2>
@@ -1022,40 +1141,38 @@ function InsightCard({
 // ---------- Budget Pie : zones prédéfinies + part claire qui se réduit + zone épargne ----------
 function BudgetPie({
   data,
-  shortGoal,
-  longGoal,
+  shortGoals,
+  longGoals,
 }: {
   data: Computed;
-  shortGoal: Goal;
-  longGoal: Goal;
+  shortGoals: SavingsGoal[];
+  longGoals: SavingsGoal[];
 }) {
-  // On simule comme si "aujourd'hui" était le dernier jour connu du relevé,
-  // pas la date réelle du jour (sinon le budget semble déjà consommé pour de vieux relevés).
-  const dow = data.currentWeekDow;
-  const factor = dow / 7; // 1 = fin de semaine
+  // Le camembert affiche la répartition de toutes les dépenses du mois en cours
+  // (hors charges fixes mensuelles, déjà exclues de data.currentMonth), entièrement
+  // "consommées" puisque ce sont des dépenses déjà réalisées.
+  const consumed: Record<BudgetCat, number> = data.currentMonth;
 
-  // Pour chaque catégorie, consommé = max(réel cette semaine, projection = budget * factor).
-  // La projection ne doit jamais "reculer" quand une dépense réelle est ajoutée : on prend
-  // le plus grand des deux plutôt que de remplacer la projection par le réel.
-  const consumed: Record<BudgetCat, number> = emptyCats();
-  (Object.keys(data.weeklyBudget) as BudgetCat[]).forEach((c) => {
-    const real = data.currentWeek[c] || 0;
-    consumed[c] = Math.max(real, data.weeklyBudget[c] * factor);
-  });
+  const shortTarget = monthlySavingsTarget(shortGoals);
+  const longTarget = monthlySavingsTarget(longGoals);
+  const split = splitSavingsFilled(data.currentMonthSaved, shortTarget, longTarget);
 
-  const savingsTarget = weeklySavingsTarget(shortGoal, longGoal);
-  const savingsFilled = Math.min(savingsTarget, data.currentWeekSaved);
-
-  const slices = buildSlices(data.weeklyBudget, consumed, savingsTarget, savingsFilled);
+  const slices = buildSlices(
+    data.currentMonth,
+    consumed,
+    { target: shortTarget, filled: split.short },
+    { target: longTarget, filled: split.long },
+  );
   const totalBudget = slices.reduce((s, x) => s + x.total, 0);
   const totalConsumed = slices.reduce((s, x) => s + Math.min(x.total, x.filled), 0);
 
   return (
     <section className="glass-strong rounded-3xl p-6">
       <div className="flex items-baseline justify-between mb-4 gap-3 flex-wrap">
-        <h2 className="font-display text-2xl font-bold">Budget de la semaine</h2>
+        <h2 className="font-display text-2xl font-bold">Budget du mois</h2>
         <p className="text-xs text-white/60">
-          Clair = zone réservée · foncé = consommé (jour {dow}/7)
+          Toutes les dépenses du mois, hors charges fixes (jour {data.currentMonthDay}/
+          {data.currentMonthDays})
         </p>
       </div>
       <div className="grid sm:grid-cols-[auto_1fr] gap-6 items-center justify-items-center sm:justify-items-start">
@@ -1094,7 +1211,7 @@ function BudgetPie({
               </li>
             );
           })}
-          {savingsTarget < 0.5 && (
+          {shortTarget < 0.5 && longTarget < 0.5 && (
             <li className="text-xs text-white/55 ml-6 mt-2">
               💡 Définis un objectif d'épargne pour réserver une zone dédiée dans ton budget.
             </li>
@@ -1106,23 +1223,29 @@ function BudgetPie({
 }
 
 // ---------- Objectifs (basé sur les goals saisis) ----------
-function ObjectifsSection({ shortGoal, longGoal }: { shortGoal: Goal; longGoal: Goal }) {
+function ObjectifsSection({
+  shortGoals,
+  longGoals,
+}: {
+  shortGoals: SavingsGoal[];
+  longGoals: SavingsGoal[];
+}) {
+  const sortByPinned = (goals: SavingsGoal[]) =>
+    [...goals].sort((a, b) => Number(b.pinned) - Number(a.pinned));
   const items = [
-    {
-      label: shortGoal.name || "Épargne court terme",
-      saved: shortGoal.saved,
-      target: shortGoal.target,
-      deadline: shortGoal.deadline,
-      color: "#e94560",
-    },
-    {
-      label: longGoal.name || "Épargne long terme",
-      saved: longGoal.saved,
-      target: longGoal.target,
-      deadline: longGoal.deadline,
-      color: "#a83bb3",
-    },
+    ...sortByPinned(shortGoals).map((g) => ({ ...g, color: "#e94560" })),
+    ...sortByPinned(longGoals).map((g) => ({ ...g, color: "#a83bb3" })),
   ];
+  if (items.length === 0) {
+    return (
+      <section className="glass-strong rounded-3xl p-6">
+        <h2 className="font-display text-2xl font-bold mb-2">Objectifs</h2>
+        <p className="text-sm text-white/60">
+          Aucun objectif d'épargne pour le moment. Ajoute-en un depuis tes portefeuilles d'épargne.
+        </p>
+      </section>
+    );
+  }
   return (
     <section className="glass-strong rounded-3xl p-6">
       <h2 className="font-display text-2xl font-bold mb-4">Objectifs</h2>
@@ -1138,9 +1261,12 @@ function ObjectifsSection({ shortGoal, longGoal }: { shortGoal: Goal; longGoal: 
                   ? "EN BONNE VOIE"
                   : "À POUSSER";
           return (
-            <div key={it.label}>
+            <div key={it.id}>
               <div className="flex items-center justify-between mb-2">
-                <span className="font-medium uppercase text-sm tracking-wide">{it.label}</span>
+                <span className="font-medium uppercase text-sm tracking-wide inline-flex items-center gap-1.5">
+                  {it.pinned && <Target className="size-3.5" style={{ color: it.color }} />}
+                  {it.name || "Objectif sans nom"}
+                </span>
                 <span className="text-[10px] font-bold tracking-wider" style={{ color: it.color }}>
                   {status}
                 </span>
@@ -1175,18 +1301,20 @@ function WalletPage({
   which,
   onBack,
   data,
-  shortGoal,
-  longGoal,
-  setShortGoal,
-  setLongGoal,
+  shortGoals,
+  longGoals,
+  setShortGoals,
+  setLongGoals,
+  importedMonths,
 }: {
   which: "courant" | "court" | "long";
   onBack: () => void;
   data: Computed;
-  shortGoal: Goal;
-  longGoal: Goal;
-  setShortGoal: (v: Goal) => void;
-  setLongGoal: (v: Goal) => void;
+  shortGoals: SavingsGoal[];
+  longGoals: SavingsGoal[];
+  setShortGoals: (v: SavingsGoal[]) => void;
+  setLongGoals: (v: SavingsGoal[]) => void;
+  importedMonths: number | null;
 }) {
   return (
     <main className="relative z-10 max-w-3xl mx-auto px-5">
@@ -1196,75 +1324,124 @@ function WalletPage({
       >
         <ArrowLeft className="size-4" /> Retour aux portefeuilles
       </button>
-      {which === "courant" && <CurrentWalletDetail data={data} />}
+      {which === "courant" && <CurrentWalletDetail data={data} importedMonths={importedMonths} />}
       {which === "court" && (
-        <SavingsGoalPage which="short" goal={shortGoal} setGoal={setShortGoal} />
+        <SavingsGoalPage which="short" goals={shortGoals} setGoals={setShortGoals} />
       )}
-      {which === "long" && <SavingsGoalPage which="long" goal={longGoal} setGoal={setLongGoal} />}
+      {which === "long" && (
+        <SavingsGoalPage which="long" goals={longGoals} setGoals={setLongGoals} />
+      )}
     </main>
   );
 }
 
-function CurrentWalletDetail({ data }: { data: Computed }) {
-  const courant = Math.max(0, Math.round(data.income - data.expense));
+function CurrentWalletDetail({
+  data,
+  importedMonths,
+}: {
+  data: Computed;
+  importedMonths: number | null;
+}) {
+  const courant = Math.round(data.income - data.expense);
   return (
     <div
       className="glass-strong rounded-[28px] p-6 sm:p-8 space-y-5"
       style={{
-        background:
-          "linear-gradient(135deg, color-mix(in oklab, #52b04a 25%, transparent), rgba(255,255,255,0.04))",
+        background: `linear-gradient(135deg, color-mix(in oklab, ${courant < 0 ? "#e94560" : "#52b04a"} 25%, transparent), rgba(255,255,255,0.04))`,
       }}
     >
       <div className="text-[10px] uppercase tracking-[0.2em] text-white/60 inline-flex items-center gap-2">
-        <Wallet className="size-3.5" /> Portefeuille
+        <Wallet className="size-3.5" /> Dépenses courantes
       </div>
       <h1 className="font-display text-3xl font-bold">Dépenses courantes</h1>
-      <div className="font-display text-5xl font-bold" style={{ color: "#52b04a" }}>
+      <div
+        className="font-display text-5xl font-bold"
+        style={{ color: courant < 0 ? "#e94560" : "#52b04a" }}
+      >
         {fmt(courant)}
       </div>
+      {importedMonths !== null && importedMonths > 1 && (
+        <p className="text-xs text-white/55">
+          Ces chiffres représentent {importedMonths} mois de relevés importés.
+        </p>
+      )}
       <div className="grid grid-cols-2 gap-3 text-sm">
         <div className="glass rounded-2xl p-4">
-          <div className="text-white/60 text-xs">Revenus du mois</div>
+          <div className="text-white/60 text-xs">Revenus</div>
           <div className="font-mono font-bold text-lg text-[var(--ember-glow)]">
             +{Math.round(data.income)}€
           </div>
         </div>
         <div className="glass rounded-2xl p-4">
-          <div className="text-white/60 text-xs">Dépenses du mois</div>
+          <div className="text-white/60 text-xs">Dépenses</div>
           <div className="font-mono font-bold text-lg text-destructive">
             −{Math.round(data.expense)}€
           </div>
         </div>
       </div>
       <p className="text-sm text-white/70">
-        Ce portefeuille reflète ce qu'il te reste après tes dépenses du mois. Il sert de base à tes
-        virements automatiques vers tes deux portefeuilles d'épargne.
+        Ce portefeuille reflète ce qu'il te reste après tes dépenses (hors loyer et charges fixes,
+        déjà déduites de ton budget mensuel). Il peut devenir négatif si tes dépenses dépassent tes
+        revenus. Il sert de base à tes virements automatiques vers tes deux portefeuilles d'épargne.
       </p>
     </div>
   );
 }
 
+const EMPTY_GOAL_FORM = { name: "", target: 0, deadline: "", saved: 0 };
+
 function SavingsGoalPage({
   which,
-  goal,
-  setGoal,
+  goals,
+  setGoals,
 }: {
   which: "short" | "long";
-  goal: Goal;
-  setGoal: (v: Goal) => void;
+  goals: SavingsGoal[];
+  setGoals: (v: SavingsGoal[]) => void;
 }) {
   const accent = which === "short" ? "#e94560" : "#a83bb3";
-  const title = which === "short" ? "Épargne à courte durée" : "Épargne à longue durée";
-  const [form, setForm] = useState(goal);
+  const label = which === "short" ? "Épargne à courte durée" : "Épargne à longue durée";
+  const title = label;
+  const [form, setForm] = useState(EMPTY_GOAL_FORM);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [justSaved, setJustSaved] = useState(false);
-  useEffect(() => setForm(goal), [goal.name, goal.target, goal.deadline]); // eslint-disable-line
   useEffect(() => {
     if (!justSaved) return;
     const t = setTimeout(() => setJustSaved(false), 2000);
     return () => clearTimeout(t);
   }, [justSaved]);
 
-  const pct = form.target > 0 ? Math.min(100, Math.round((form.saved / form.target) * 100)) : 0;
+  const sorted = [...goals].sort((a, b) => Number(b.pinned) - Number(a.pinned));
+
+  function resetForm() {
+    setForm(EMPTY_GOAL_FORM);
+    setEditingId(null);
+  }
+
+  function submit() {
+    if (!form.name.trim()) return;
+    if (editingId) {
+      setGoals(goals.map((g) => (g.id === editingId ? { ...g, ...form } : g)));
+    } else {
+      setGoals([...goals, { id: `goal-${Date.now()}`, ...form, pinned: goals.length === 0 }]);
+    }
+    setJustSaved(true);
+    resetForm();
+  }
+
+  function startEdit(g: SavingsGoal) {
+    setEditingId(g.id);
+    setForm({ name: g.name, target: g.target, deadline: g.deadline, saved: g.saved });
+  }
+
+  function remove(id: string) {
+    setGoals(goals.filter((g) => g.id !== id));
+    if (editingId === id) resetForm();
+  }
+
+  function togglePin(id: string) {
+    setGoals(goals.map((g) => (g.id === id ? { ...g, pinned: !g.pinned } : g)));
+  }
 
   return (
     <div
@@ -1275,106 +1452,159 @@ function SavingsGoalPage({
     >
       <div>
         <div className="text-[10px] uppercase tracking-[0.2em] text-white/60 inline-flex items-center gap-2">
-          <Wallet className="size-3.5" /> Portefeuille
+          <Wallet className="size-3.5" /> {label}
         </div>
         <h1 className="font-display text-3xl font-bold">{title}</h1>
       </div>
 
-      <div className="grid sm:grid-cols-3 gap-3">
+      <div className="space-y-3">
+        <h2 className="text-sm font-semibold text-white/80">
+          {editingId ? "Modifier l'objectif" : "Ajouter un nouvel objectif"}
+        </h2>
+        <div className="grid sm:grid-cols-3 gap-3">
+          <label className="block">
+            <span className="text-xs text-white/70">Nom de l'objectif</span>
+            <input
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder={which === "short" ? "Ex: Vacances Lisbonne" : "Ex: Apport appart"}
+              className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none focus:ring-2"
+              style={{ accentColor: accent }}
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-white/70">Montant cible (€)</span>
+            <input
+              type="number"
+              value={form.target}
+              onChange={(e) =>
+                setForm({ ...form, target: e.target.value === "" ? 0 : +e.target.value })
+              }
+              className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-white/70">Échéance</span>
+            <input
+              type="date"
+              value={form.deadline}
+              onChange={(e) => setForm({ ...form, deadline: e.target.value })}
+              className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
+            />
+          </label>
+        </div>
+
         <label className="block">
-          <span className="text-xs text-white/70">Nom de l'objectif</span>
-          <input
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            placeholder={which === "short" ? "Ex: Vacances Lisbonne" : "Ex: Apport appart"}
-            className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none focus:ring-2"
-            style={{ accentColor: accent }}
-          />
-        </label>
-        <label className="block">
-          <span className="text-xs text-white/70">Montant cible (€)</span>
+          <span className="text-xs text-white/70">Déjà épargné (€)</span>
           <input
             type="number"
-            value={form.target}
+            value={form.saved}
             onChange={(e) =>
-              setForm({ ...form, target: e.target.value === "" ? 0 : +e.target.value })
+              setForm({ ...form, saved: e.target.value === "" ? 0 : +e.target.value })
             }
             className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
           />
         </label>
-        <label className="block">
-          <span className="text-xs text-white/70">Échéance</span>
-          <input
-            type="date"
-            value={form.deadline}
-            onChange={(e) => setForm({ ...form, deadline: e.target.value })}
-            className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
-          />
-        </label>
-      </div>
 
-      <label className="block">
-        <span className="text-xs text-white/70">Déjà épargné (€)</span>
-        <input
-          type="number"
-          value={form.saved}
-          onChange={(e) => setForm({ ...form, saved: e.target.value === "" ? 0 : +e.target.value })}
-          className="mt-1 w-full glass rounded-xl px-3 py-2 outline-none"
-        />
-      </label>
-
-      <div className="h-8 rounded-full glass relative overflow-hidden">
-        <div
-          className="h-full flex items-center justify-center text-xs font-bold transition-all"
-          style={{ width: `${pct}%`, background: `linear-gradient(90deg, ${accent}, ${accent}aa)` }}
-        >
-          {pct > 8 ? `${pct}%` : ""}
+        <div className="flex gap-3 items-center">
+          <button
+            onClick={submit}
+            className="liquid-tab px-5 py-2.5 font-medium inline-flex items-center gap-2"
+            style={{
+              background: `linear-gradient(180deg, color-mix(in oklab, ${accent} 35%, transparent), color-mix(in oklab, ${accent} 10%, transparent))`,
+            }}
+          >
+            <Target className="size-4" />
+            {editingId ? "Enregistrer les modifications" : "Ajouter l'objectif"}
+          </button>
+          {editingId && (
+            <button
+              onClick={resetForm}
+              className="text-xs text-white/60 hover:text-white self-center"
+            >
+              Annuler
+            </button>
+          )}
+          {justSaved && (
+            <span className="text-xs font-medium" style={{ color: accent }}>
+              Objectif enregistré ✓
+            </span>
+          )}
         </div>
       </div>
 
-      <div className="flex gap-3 items-center">
-        <button
-          onClick={() => {
-            setGoal(form);
-            setJustSaved(true);
-          }}
-          className="liquid-tab px-5 py-2.5 font-medium inline-flex items-center gap-2"
-          style={{
-            background: `linear-gradient(180deg, color-mix(in oklab, ${accent} 35%, transparent), color-mix(in oklab, ${accent} 10%, transparent))`,
-          }}
-        >
-          <Target className="size-4" /> Enregistrer l'objectif
-        </button>
-        {justSaved ? (
-          <span className="text-xs font-medium" style={{ color: accent }}>
-            Objectif enregistré ✓
-          </span>
-        ) : (
-          goal.target > 0 && (
-            <span className="text-xs text-white/60 self-center">
-              L'avancement se reflétera dans la section Objectifs.
-            </span>
-          )
+      <div className="space-y-4">
+        <h2 className="text-sm font-semibold text-white/80">Tes objectifs</h2>
+        {sorted.length === 0 && (
+          <p className="text-sm text-white/60">Aucun objectif pour l'instant.</p>
         )}
+        {sorted.map((g) => {
+          const pct = g.target > 0 ? Math.min(100, Math.round((g.saved / g.target) * 100)) : 0;
+          return (
+            <div key={g.id} className="glass rounded-2xl p-4 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium inline-flex items-center gap-1.5">
+                  {g.pinned && <Target className="size-3.5" style={{ color: accent }} />}
+                  {g.name || "Objectif sans nom"}
+                </span>
+                <div className="flex items-center gap-2 text-xs">
+                  <button
+                    onClick={() => togglePin(g.id)}
+                    className="text-white/60 hover:text-white"
+                    title={g.pinned ? "Désépingler" : "Épingler en haut"}
+                  >
+                    {g.pinned ? "Désépingler" : "Épingler"}
+                  </button>
+                  <button onClick={() => startEdit(g)} className="text-white/60 hover:text-white">
+                    Modifier
+                  </button>
+                  <button
+                    onClick={() => remove(g.id)}
+                    className="text-destructive/80 hover:text-destructive"
+                  >
+                    Supprimer
+                  </button>
+                </div>
+              </div>
+              <div className="h-7 rounded-full glass relative overflow-hidden">
+                <div
+                  className="h-full flex items-center justify-center text-xs font-bold transition-all"
+                  style={{
+                    width: `${pct}%`,
+                    background: `linear-gradient(90deg, ${accent}, ${accent}aa)`,
+                  }}
+                >
+                  {pct > 8 ? `${pct}%` : ""}
+                </div>
+              </div>
+              <div className="flex justify-between text-[11px] text-white/55">
+                <span>
+                  {Math.round(g.saved)}€ / {Math.round(g.target)}€
+                </span>
+                {g.deadline && <span>échéance {g.deadline}</span>}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-// ---------- Stats tab : lignes liquid glass par semaine ----------
+// ---------- Stats tab : lignes liquid glass par mois ----------
 function StatsTab({
   data,
-  shortGoal,
-  longGoal,
+  shortGoals,
+  longGoals,
 }: {
   data: Computed;
-  shortGoal: Goal;
-  longGoal: Goal;
+  shortGoals: SavingsGoal[];
+  longGoals: SavingsGoal[];
 }) {
-  const weeks = [...data.weeks].reverse(); // plus récent en haut
-  const maxSaved = Math.max(1, ...weeks.map((w) => w.saved));
-  const totalSaved = weeks.reduce((s, w) => s + w.saved, 0);
-  const last10 = data.weeks.slice(-10); // chronologique pour la courbe
+  const months = [...data.months].reverse(); // plus récent en haut
+  const maxSaved = Math.max(1, ...months.map((m) => m.saved));
+  const totalSaved = months.reduce((s, m) => s + m.saved, 0);
+  const last10 = data.months.slice(-10); // chronologique pour la courbe
 
   return (
     <>
@@ -1388,26 +1618,26 @@ function StatsTab({
             </span>
           </div>
         </div>
-        <p className="text-xs text-white/55 mt-1">Évolution sur les 10 dernières semaines.</p>
+        <p className="text-xs text-white/55 mt-1">Évolution sur les 10 derniers mois.</p>
         <div className="mt-5">
-          <SavingsCurve weeks={last10} />
+          <SavingsCurve months={last10} />
         </div>
       </section>
 
       <section className="space-y-3">
-        {weeks.length === 0 && (
+        {months.length === 0 && (
           <div className="glass-strong rounded-3xl p-8 text-center text-white/60">
-            Aucune semaine détectée dans ton fichier.
+            Aucun mois détecté dans ton fichier.
           </div>
         )}
-        {weeks.map((w) => (
-          <WeekStatRow
-            key={w.key}
-            w={w}
+        {months.map((m) => (
+          <MonthStatRow
+            key={m.key}
+            m={m}
             maxSaved={maxSaved}
             data={data}
-            shortGoal={shortGoal}
-            longGoal={longGoal}
+            shortGoals={shortGoals}
+            longGoals={longGoals}
           />
         ))}
       </section>
@@ -1415,19 +1645,19 @@ function StatsTab({
   );
 }
 
-function SavingsCurve({ weeks }: { weeks: WeekRow[] }) {
-  if (weeks.length === 0) {
+function SavingsCurve({ months }: { months: MonthRow[] }) {
+  if (months.length === 0) {
     return <div className="text-sm text-white/50 text-center py-6">Pas encore de données.</div>;
   }
   const W = 600,
     H = 200,
     P = 32;
-  const maxV = Math.max(1, ...weeks.map((w) => w.saved));
-  const n = weeks.length;
+  const maxV = Math.max(1, ...months.map((m) => m.saved));
+  const n = months.length;
   const x = (i: number) => P + (n === 1 ? (W - 2 * P) / 2 : (i * (W - 2 * P)) / (n - 1));
   const y = (v: number) => H - P - (v / maxV) * (H - 2 * P);
 
-  const pts = weeks.map((w, i) => [x(i), y(w.saved)] as const);
+  const pts = months.map((m, i) => [x(i), y(m.saved)] as const);
   const path = pts
     .map((p, i) => `${i === 0 ? "M" : "L"} ${p[0].toFixed(1)} ${p[1].toFixed(1)}`)
     .join(" ");
@@ -1479,10 +1709,10 @@ function SavingsCurve({ weeks }: { weeks: WeekRow[] }) {
             fill="rgba(255,255,255,0.85)"
             fontFamily="monospace"
           >
-            {Math.round(weeks[i].saved)}€
+            {Math.round(months[i].saved)}€
           </text>
           <text x={px} y={H - 10} textAnchor="middle" fontSize="9" fill="rgba(255,255,255,0.5)">
-            S{weeks[i].key.split("-S")[1]}
+            {months[i].label.slice(0, 3)}
           </text>
         </g>
       ))}
@@ -1490,32 +1720,41 @@ function SavingsCurve({ weeks }: { weeks: WeekRow[] }) {
   );
 }
 
-function WeekStatRow({
-  w,
+function MonthStatRow({
+  m,
   maxSaved,
   data,
-  shortGoal,
-  longGoal,
+  shortGoals,
+  longGoals,
 }: {
-  w: WeekRow;
+  m: MonthRow;
   maxSaved: number;
   data: Computed;
-  shortGoal: Goal;
-  longGoal: Goal;
+  shortGoals: SavingsGoal[];
+  longGoals: SavingsGoal[];
 }) {
   const [open, setOpen] = useState(false);
-  const pct = (w.saved / maxSaved) * 100;
+  const pct = (m.saved / maxSaved) * 100;
 
-  // Pour le camembert : zones prédéfinies = baseline globale (référence), consommé = cats de la semaine
-  // + zone épargne avec target hebdo et "filled" = ce qui a effectivement été épargné cette semaine
+  // Pour le camembert : zones prédéfinies = baseline globale (référence), consommé = cats du mois
+  // + zones épargne court/long avec leur cible mensuelle et "filled" = épargné ce mois-là
   const reference: Record<BudgetCat, number> = emptyCats();
   (Object.keys(data.baseline) as BudgetCat[]).forEach((c) => {
-    reference[c] = Math.max(data.baseline[c], w.cats[c]);
+    reference[c] = Math.max(data.baseline[c], m.cats[c]);
   });
-  const savingsTarget = weeklySavingsTarget(shortGoal, longGoal);
-  const slices = buildSlices(reference, w.cats, savingsTarget, w.saved);
+  const shortTarget = monthlySavingsTarget(shortGoals);
+  const longTarget = monthlySavingsTarget(longGoals);
+  const split = splitSavingsFilled(m.saved, shortTarget, longTarget);
+  const slices = buildSlices(
+    reference,
+    m.cats,
+    { target: shortTarget, filled: split.short },
+    { target: longTarget, filled: split.long },
+  );
   const totalRef = slices.reduce((s, x) => s + x.total, 0);
-  const totalSpent = slices.filter((s) => s.label !== "Épargne").reduce((s, x) => s + x.filled, 0);
+  const totalSpent = slices
+    .filter((s) => s.label !== "Épargne courte" && s.label !== "Épargne longue")
+    .reduce((s, x) => s + x.filled, 0);
 
   return (
     <div className="glass-strong rounded-2xl overflow-hidden">
@@ -1530,16 +1769,16 @@ function WeekStatRow({
         <div className="relative flex items-center gap-4">
           <Calendar className="size-5 text-white/60 shrink-0" />
           <div className="flex-1 min-w-0">
-            <div className="font-display font-semibold">Semaine {w.key.split("-S")[1]}</div>
+            <div className="font-display font-semibold">{m.label}</div>
 
             <div className="text-xs text-white/55">
-              {w.label} · revenus {Math.round(w.income)}€ · dépenses {Math.round(w.spent)}€
+              revenus {Math.round(m.income)}€ · dépenses {Math.round(m.spent)}€
             </div>
           </div>
           <div className="text-right">
             <div className="text-[10px] uppercase tracking-widest text-white/50">Épargné</div>
             <div className="font-display font-bold text-xl text-[var(--ember-glow)]">
-              {Math.round(w.saved)}€
+              {Math.round(m.saved)}€
             </div>
           </div>
           <ArrowRight
@@ -1569,7 +1808,7 @@ function WeekStatRow({
                 <span className="size-3.5 rounded-sm" style={{ background: s.color }} />
                 <span className="flex-1">{s.label}</span>
                 <span className="font-mono text-xs text-white/70">
-                  {s.label === "Épargne"
+                  {s.label === "Épargne courte" || s.label === "Épargne longue"
                     ? `${Math.round(s.filled)}/${Math.round(s.total)}€`
                     : `${Math.round(s.filled)}€`}
                 </span>
@@ -1595,6 +1834,33 @@ const ARTICLES = [
       "Avant tout placement, vise un matelas de sécurité de 1 à 3 mois de dépenses sur un livret (LDDS, Livret A). Puis seulement, oriente le reste vers du long terme.",
       "Règle d'or : automatise. Vire vers ton compte d'épargne le jour même où tu reçois ton salaire/bourse. Ce que tu ne vois pas, tu ne le dépenses pas.",
     ],
+    quiz: [
+      {
+        question: "Sur 30 ans à 6% annuels, 50€/mois épargnés deviennent environ :",
+        options: ["12 000€", "30 000€", "50 000€", "100 000€"],
+        correct: 2,
+      },
+      {
+        question: "Avant tout placement, que recommande l'article ?",
+        options: [
+          "Un matelas de sécurité de 1 à 3 mois de dépenses sur un livret",
+          "Investir directement en bourse",
+          "Emprunter pour investir plus vite",
+          "Attendre d'avoir 10 000€ avant d'épargner",
+        ],
+        correct: 0,
+      },
+      {
+        question: "Quelle est la \"règle d'or\" pour bien épargner ?",
+        options: [
+          "Épargner ce qu'il reste en fin de mois",
+          "Automatiser le virement dès la réception du salaire",
+          "Épargner une fois par an",
+          "Demander à ses parents de gérer l'épargne",
+        ],
+        correct: 1,
+      },
+    ],
   },
   {
     title: "Livret A, LDDS, PEL : où mettre tes premiers euros ?",
@@ -1608,6 +1874,28 @@ const ARTICLES = [
       "PEL : utile uniquement si tu vises l'achat immobilier sous 4-10 ans.",
       "Verdict : Livret A en n°1 pour l'épargne courte. Au-dessus du plafond, vise des supports plus rémunérateurs.",
     ],
+    quiz: [
+      {
+        question: "Quel est le plafond du Livret A ?",
+        options: ["12 000€", "22 950€", "50 000€", "Aucun plafond"],
+        correct: 1,
+      },
+      {
+        question: "Quel est le plafond du LDDS ?",
+        options: ["8 000€", "12 000€", "15 000€", "22 950€"],
+        correct: 1,
+      },
+      {
+        question: "Le PEL est surtout utile si tu vises :",
+        options: [
+          "Un achat immobilier sous 4-10 ans",
+          "Un investissement en cryptomonnaies",
+          "Une épargne disponible immédiatement",
+          "Un placement sans aucune contrainte",
+        ],
+        correct: 0,
+      },
+    ],
   },
   {
     title: "Investir en bourse via un PEA ou une assurance-vie",
@@ -1619,6 +1907,33 @@ const ARTICLES = [
       "Un ETF MSCI World te donne accès à ~1500 entreprises de pays développés en une seule ligne. Frais < 0,4%/an.",
       "Le PEA est défiscalisé après 5 ans (hors prélèvements sociaux). L'assurance-vie permet plus de souplesse et une fiscalité douce après 8 ans.",
       "Ne mets jamais en bourse de l'argent dont tu peux avoir besoin dans les 5 ans à venir.",
+    ],
+    quiz: [
+      {
+        question: "Un ETF MSCI World donne accès à environ :",
+        options: [
+          "Une seule entreprise française",
+          "~1500 entreprises de pays développés",
+          "Uniquement des entreprises technologiques américaines",
+          "Des cryptomonnaies diversifiées",
+        ],
+        correct: 1,
+      },
+      {
+        question: "Le PEA devient défiscalisé (hors prélèvements sociaux) après :",
+        options: ["2 ans", "5 ans", "8 ans", "10 ans"],
+        correct: 1,
+      },
+      {
+        question: "Quelle règle s'applique à l'argent placé en bourse ?",
+        options: [
+          "Ne jamais y placer d'argent dont tu peux avoir besoin dans les 5 ans",
+          "Tout retirer après 6 mois",
+          "Investir uniquement à crédit",
+          "Ne placer que sur une seule action",
+        ],
+        correct: 0,
+      },
     ],
   },
   {
@@ -1632,6 +1947,33 @@ const ARTICLES = [
       "Privilégie des plateformes enregistrées PSAN. Active la double authentification.",
       "Stratégie DCA (Dollar Cost Averaging) : un petit montant fixe chaque mois lisse la volatilité.",
     ],
+    quiz: [
+      {
+        question: "Quelle part maximale de patrimoine l'article suggère-t-il pour les cryptos ?",
+        options: ["5%", "25%", "50%", "100%"],
+        correct: 0,
+      },
+      {
+        question: "Quel type de plateforme privilégier pour acheter des cryptos ?",
+        options: [
+          "Une plateforme enregistrée PSAN",
+          "N'importe quel site trouvé sur les réseaux sociaux",
+          "Une plateforme sans aucune vérification d'identité",
+          "Un échange entre particuliers en espèces",
+        ],
+        correct: 0,
+      },
+      {
+        question: "La stratégie DCA consiste à :",
+        options: [
+          "Investir tout son argent en une fois au plus bas",
+          "Investir un petit montant fixe régulièrement",
+          "Vendre dès que le cours baisse",
+          "Emprunter pour maximiser la mise",
+        ],
+        correct: 1,
+      },
+    ],
   },
   {
     title: "La règle des 50/30/20 expliquée simplement",
@@ -1643,6 +1985,23 @@ const ARTICLES = [
       "50% pour les charges fixes : loyer, courses, transport, abonnements indispensables.",
       "30% pour les envies : sorties, vêtements, voyages.",
       "20% pour l'épargne et le remboursement de dettes. Si tu n'y arrives pas, vise 10% et grimpe progressivement.",
+    ],
+    quiz: [
+      {
+        question: "Dans la règle 50/30/20, à quoi correspondent les 50% ?",
+        options: ["Les envies", "L'épargne", "Les charges fixes (besoins)", "Les loisirs"],
+        correct: 2,
+      },
+      {
+        question: "Quelle part du revenu est dédiée à l'épargne et au remboursement de dettes ?",
+        options: ["10%", "20%", "30%", "50%"],
+        correct: 1,
+      },
+      {
+        question: "Si 20% d'épargne est trop ambitieux au début, quel objectif viser ?",
+        options: ["0%, abandonner l'épargne", "5%", "10% puis progresser", "50% directement"],
+        correct: 2,
+      },
     ],
   },
   {
@@ -1657,6 +2016,38 @@ const ARTICLES = [
       '🏆 Le Cheat Code : convertis toujours les prix en "heures de travail" avant de valider un panier. Tu verras que 90% des trucs perdent instantanément de leur charme.',
       "🎯 La Mission : prends le dernier objet que tu as acheté pour te faire plaisir. Trouve son prix, divise-le par 9 (le taux horaire du SMIC), et note sur un post-it le nombre d'heures que ça représente.",
     ],
+    quiz: [
+      {
+        question: "Selon l'article, l'argent représente avant tout :",
+        options: [
+          "Un simple chiffre sur un écran",
+          "Ton temps de vie converti en monnaie",
+          "Un objet de collection",
+          "Une dette envers la banque",
+        ],
+        correct: 1,
+      },
+      {
+        question: "Le \"Cheat Code\" proposé consiste à :",
+        options: [
+          "Ne jamais regarder les prix",
+          "Convertir les prix en heures de travail avant d'acheter",
+          "Payer toujours en plusieurs fois",
+          "Demander un crédit avant chaque achat",
+        ],
+        correct: 1,
+      },
+      {
+        question: "La \"Mission\" du chapitre demande de :",
+        options: [
+          "Calculer le coût en heures de travail de ton dernier achat plaisir",
+          "Ouvrir un compte en bourse",
+          "Annuler tous tes abonnements",
+          "Emprunter à un ami",
+        ],
+        correct: 0,
+      },
+    ],
   },
   {
     title: "L'anatomie d'une banque",
@@ -1669,6 +2060,38 @@ const ARTICLES = [
       "🔦 La Réalité : ta banque te donne deux outils complètement différents. Le \"compte courant\" (relié à ta carte bancaire), c'est le hall de gare : l'argent y transite, ne rapporte absolument rien, et n'attend qu'à être dépensé. Le \"livret\", c'est la salle des coffres : l'argent y est protégé et il fait des petits (les intérêts). Laisser toutes tes économies sur un compte courant, c'est comme laisser ton vélo dans la rue sans cadenas : il finira par disparaître dans des dépenses inutiles.",
       "🏆 Le Cheat Code : ton compte courant doit être une zone de transit, presque vide. Dès que l'argent arrive, transfère tout ce que tu ne prévois pas de dépenser dans le mois vers ton livret.",
       "🎯 La Mission : ouvre l'appli de ta banque. Regarde la différence de solde entre ton compte courant et tes livrets. S'il y a plus d'argent sur le courant que sur l'épargne, fais un virement de 20€ tout de suite vers le livret.",
+    ],
+    quiz: [
+      {
+        question: "À quoi le compte courant est-il comparé dans l'article ?",
+        options: [
+          "Une salle des coffres",
+          "Un hall de gare",
+          "Un coffre-fort blindé",
+          "Un compte d'assurance-vie",
+        ],
+        correct: 1,
+      },
+      {
+        question: "À quoi le livret est-il comparé ?",
+        options: [
+          "Un hall de gare",
+          "Une salle des coffres où l'argent fait des petits",
+          "Un compte bloqué à vie",
+          "Une carte de crédit",
+        ],
+        correct: 1,
+      },
+      {
+        question: "Que recommande le \"Cheat Code\" ?",
+        options: [
+          "Garder toutes ses économies sur le compte courant",
+          "Transférer vers le livret l'argent non prévu pour le mois",
+          "Ne jamais utiliser de livret",
+          "Fermer son compte courant définitivement",
+        ],
+        correct: 1,
+      },
     ],
   },
   {
@@ -1683,6 +2106,28 @@ const ARTICLES = [
       "🏆 Le Cheat Code : atteindre le plafond de ce livret (les 1 600€) doit être ta quête principale dans le jeu de la finance. Une fois rempli, c'est ton bouclier d'invincibilité pour les années à venir (permis, premier appart).",
       "🎯 La Mission : vérifie si tu as un Livret Jeune ouvert. Si oui, regarde son taux d'intérêt dans les détails du compte. Si non, envoie un message à ton conseiller via l'appli pour exiger son ouverture (c'est un droit et c'est gratuit).",
     ],
+    quiz: [
+      {
+        question: "Entre quel âge peut-on bénéficier d'un Livret Jeune ?",
+        options: ["0-18 ans", "12-25 ans", "18-30 ans", "16-21 ans"],
+        correct: 1,
+      },
+      {
+        question: "Quel est le plafond de dépôt du Livret Jeune ?",
+        options: ["1 600€", "12 000€", "22 950€", "10 000€"],
+        correct: 0,
+      },
+      {
+        question: "Comment les intérêts du Livret Jeune sont-ils imposés ?",
+        options: [
+          "Fortement imposés",
+          "Aucun impôt sur les intérêts",
+          "Imposés à 30% (flat tax)",
+          "Selon ta tranche d'imposition",
+        ],
+        correct: 1,
+      },
+    ],
   },
   {
     title: "Le piège de la tribu",
@@ -1695,6 +2140,33 @@ const ARTICLES = [
       "🔦 La Réalité : personne ne s'intéresse réellement à tes chaussures ; les gens ne s'intéressent qu'à l'image qu'ils renvoient eux-mêmes. Lâcher tout ton argent de poche ou ton premier salaire pour un logo, c'est payer une \"taxe d'insécurité\". Tu enrichis une multinationale en te ruinant, juste pour acheter la validation temporaire de gens qui auront oublié ta tenue dans trois jours.",
       "🏆 Le Cheat Code : le vrai flex n'est pas ce que tu portes, c'est l'argent que tu as sécurisé en banque. Un gars en t-shirt basique avec 1 000€ de côté est financièrement plus libre et serein que le gars en survêtement de créateur dont le compte est à sec le 10 du mois.",
       '🎯 La Mission : identifie une dépense que tu allais faire uniquement pour "paraître" (vêtement, soirée, accessoire) et annule-la. Prends cet argent et envoie-le sur ton livret.',
+    ],
+    quiz: [
+      {
+        question: "Selon l'article, le \"vrai flex\" c'est :",
+        options: [
+          "Le dernier iPhone",
+          "Des sneakers à 200€",
+          "L'argent sécurisé en banque",
+          "Des vêtements de marque",
+        ],
+        correct: 2,
+      },
+      {
+        question: "Acheter uniquement pour \"paraître\" est qualifié dans l'article de :",
+        options: ["Investissement malin", "Taxe d'insécurité", "Épargne automatique", "Bon plan"],
+        correct: 1,
+      },
+      {
+        question: "Que propose la \"Mission\" du chapitre ?",
+        options: [
+          "Acheter plus de vêtements de marque",
+          "Annuler une dépense \"pour paraître\" et l'épargner",
+          "Emprunter pour suivre la tendance",
+          "Ignorer complètement ses finances",
+        ],
+        correct: 1,
+      },
     ],
   },
   {
@@ -1709,6 +2181,33 @@ const ARTICLES = [
       "🏆 Le Cheat Code : considère chaque abonnement mensuel comme une fuite dans la coque de ton bateau. Fais une purge violente tous les 6 mois.",
       "🎯 La Mission : prends l'historique de ton compte bancaire sur les 30 derniers jours. Traque les prélèvements automatiques et résilie immédiatement un service que tu as utilisé moins de 2 heures cette semaine.",
     ],
+    quiz: [
+      {
+        question: "Un abonnement à 5,99€/mois sur deux ans représente environ :",
+        options: ["50€", "70€", "plus de 140€", "20€"],
+        correct: 2,
+      },
+      {
+        question: "Comment l'article nomme-t-il cet effet d'accumulation d'abonnements ?",
+        options: [
+          "\"mort par mille coupures\"",
+          "\"effet boule de neige\"",
+          "\"bonus de fidélité\"",
+          "\"effet richesse\"",
+        ],
+        correct: 0,
+      },
+      {
+        question: "Que recommande le \"Cheat Code\" ?",
+        options: [
+          "Souscrire à plus d'abonnements",
+          "Faire une purge des abonnements tous les 6 mois",
+          "Ne jamais vérifier ses prélèvements",
+          "Payer uniquement en espèces",
+        ],
+        correct: 1,
+      },
+    ],
   },
   {
     title: "La fiche de paie du premier job",
@@ -1721,6 +2220,33 @@ const ARTICLES = [
       '🔦 La Réalité : bienvenue dans le monde adulte et la claque du "Brut vs Net". Le salaire "brut" (les 1 800€), c\'est ce que l\'entreprise paie au total. Mais l\'État prend sa part directement à la source (environ 22%) pour financer le système social : la santé, le chômage, la retraite. Ce sont les "cotisations". Ce qui arrive réellement sur ton compte, c\'est le salaire "net" (environ 1 400€).',
       "🏆 Le Cheat Code : quand tu postules ou que tu calcules ton budget, le salaire brut est une illusion. Multiplie toujours le salaire brut annoncé par 0,78 (environ) pour connaître l'argent que tu pourras réellement dépenser.",
       '🎯 La Mission : cherche "convertisseur brut net" sur ton téléphone. Entre un salaire de 2000€ brut, et regarde combien il te resterait exactement en net pour réaliser la différence.',
+    ],
+    quiz: [
+      {
+        question: "Le salaire \"brut\" correspond à :",
+        options: [
+          "Ce qui arrive réellement sur ton compte",
+          "Ce que l'entreprise paie au total, avant cotisations",
+          "Ton épargne mensuelle",
+          "Tes impôts annuels",
+        ],
+        correct: 1,
+      },
+      {
+        question: "Pour estimer ton salaire net à partir du brut, multiplie-le par environ :",
+        options: ["0,5", "0,78", "1,2", "0,9"],
+        correct: 1,
+      },
+      {
+        question: "Les cotisations prélevées sur le salaire financent notamment :",
+        options: [
+          "Les actionnaires de l'entreprise",
+          "La santé, le chômage et la retraite",
+          "Les abonnements numériques",
+          "Les cryptomonnaies",
+        ],
+        correct: 1,
+      },
     ],
   },
   {
@@ -1735,6 +2261,33 @@ const ARTICLES = [
       "🏆 Le Cheat Code : instaure la règle des 24h. Si un objet te fait de l'œil, mets-le dans ton panier, ferme l'application, et va dormir. Si le lendemain à la même heure tu en as toujours un besoin vital et justifié, achète-le. La plupart du temps, l'envie aura totalement disparu.",
       "🎯 La Mission : détache ta carte bancaire d'Apple Pay / Google Pay et supprime-la des applications e-commerce. Oblige-toi à devoir te lever pour aller chercher le bout de plastique physique à chaque achat. La flemme est ton meilleur bouclier financier.",
     ],
+    quiz: [
+      {
+        question: "Pourquoi les achats nocturnes sont-ils particulièrement risqués ?",
+        options: [
+          "Les prix sont plus élevés la nuit",
+          "Le cerveau est fatigué et la volonté est épuisée",
+          "Les boutiques en ligne sont fermées",
+          "Les cartes bancaires ne fonctionnent pas la nuit",
+        ],
+        correct: 1,
+      },
+      {
+        question: "La règle proposée par l'article est d'attendre :",
+        options: ["1 semaine", "24h", "1 mois", "1 an"],
+        correct: 1,
+      },
+      {
+        question: "Que recommande la \"Mission\" du chapitre ?",
+        options: [
+          "Activer le paiement en un clic partout",
+          "Supprimer sa carte bancaire des applications e-commerce",
+          "Augmenter son découvert autorisé",
+          "Acheter immédiatement ce qui plaît",
+        ],
+        correct: 1,
+      },
+    ],
   },
   {
     title: "Le bouclier anti-découvert",
@@ -1748,17 +2301,53 @@ const ARTICLES = [
       '🏆 Le Cheat Code : refuse les cartes bancaires classiques. Exige une "carte à autorisation systématique" (type Maestro ou Visa Electron). Avant chaque paiement, cette carte interroge ton compte : si le solde est insuffisant, le paiement est bloqué. Pas de découvert, donc pas de frais bancaires, jamais.',
       '🎯 La Mission : vérifie ton contrat bancaire ou demande à ton conseiller si ta carte actuelle t\'autorise un "découvert". Si oui, demande à passer immédiatement sur une carte à contrôle de solde systématique.',
     ],
+    quiz: [
+      {
+        question: "Comment l'article décrit-il le découvert bancaire ?",
+        options: [
+          "Une avance gratuite de la banque",
+          "Un crédit toxique qui coûte cher",
+          "Un cadeau pour les bons clients",
+          "Une forme d'épargne automatique",
+        ],
+        correct: 1,
+      },
+      {
+        question: "Quels frais la banque facture-t-elle en cas de découvert ?",
+        options: [
+          "Aucun frais",
+          "Des agios et des frais d'intervention",
+          "Une prime de fidélité",
+          "Un remboursement",
+        ],
+        correct: 1,
+      },
+      {
+        question: "Quelle carte permet d'éviter tout découvert ?",
+        options: [
+          "Une carte de crédit classique",
+          "Une carte à autorisation systématique",
+          "Une carte illimitée",
+          "Une carte sans contrôle de solde",
+        ],
+        correct: 1,
+      },
+    ],
   },
 ];
 
 function FormationTab() {
   const [open, setOpen] = useState<number | null>(null);
+  const [quizUnlocked, setQuizUnlocked] = useState(false);
   if (open !== null) {
     const a = ARTICLES[open];
     return (
       <section className="glass-strong rounded-3xl p-6 sm:p-8 space-y-4">
         <button
-          onClick={() => setOpen(null)}
+          onClick={() => {
+            setOpen(null);
+            setQuizUnlocked(false);
+          }}
           className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-2"
         >
           <ArrowLeft className="size-4" /> Tous les articles
@@ -1772,6 +2361,18 @@ function FormationTab() {
             <p key={i}>{p}</p>
           ))}
         </div>
+        {quizUnlocked ? (
+          <LessonQuiz quiz={a.quiz} />
+        ) : (
+          <div className="border-t border-white/10 pt-6 mt-2">
+            <button
+              onClick={() => setQuizUnlocked(true)}
+              className="liquid-tab px-5 py-2.5 font-medium inline-flex items-center gap-2"
+            >
+              <Sparkles className="size-4" /> Accéder au quiz
+            </button>
+          </div>
+        )}
       </section>
     );
   }
@@ -1793,7 +2394,10 @@ function FormationTab() {
         {ARTICLES.map((a, i) => (
           <button
             key={a.title}
-            onClick={() => setOpen(i)}
+            onClick={() => {
+              setOpen(i);
+              setQuizUnlocked(false);
+            }}
             className="glass-strong rounded-2xl p-5 text-left hover:-translate-y-0.5 transition-all"
           >
             <div className="text-[10px] uppercase tracking-widest text-[var(--ember-glow)]">
@@ -1808,6 +2412,90 @@ function FormationTab() {
         ))}
       </section>
     </>
+  );
+}
+
+// ---------- Quiz de fin de leçon ----------
+type QuizQuestion = { question: string; options: string[]; correct: number };
+
+function LessonQuiz({ quiz }: { quiz: QuizQuestion[] }) {
+  const [answers, setAnswers] = useState<(number | null)[]>(quiz.map(() => null));
+  const [submitted, setSubmitted] = useState(false);
+
+  const score = answers.filter((a, i) => a === quiz[i].correct).length;
+  const allAnswered = answers.every((a) => a !== null);
+
+  function selectAnswer(qi: number, oi: number) {
+    if (submitted) return;
+    setAnswers((prev) => prev.map((a, i) => (i === qi ? oi : a)));
+  }
+
+  function restart() {
+    setAnswers(quiz.map(() => null));
+    setSubmitted(false);
+  }
+
+  return (
+    <section className="border-t border-white/10 pt-6 mt-2 space-y-5">
+      <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-widest text-[var(--ember-glow)]">
+        <Sparkles className="size-3.5" /> Quiz
+      </div>
+      <h2 className="font-display text-xl font-bold">Vérifie ce que tu as retenu</h2>
+      {quiz.map((q, qi) => (
+        <div key={qi} className="glass rounded-2xl p-4">
+          <p className="font-medium mb-3">
+            {qi + 1}. {q.question}
+          </p>
+          <div className="grid sm:grid-cols-2 gap-2">
+            {q.options.map((opt, oi) => {
+              const selected = answers[qi] === oi;
+              const isCorrect = oi === q.correct;
+              let style = "border-white/10 hover:border-white/25";
+              if (submitted) {
+                if (isCorrect) style = "border-[#52b04a] bg-[#52b04a]/10";
+                else if (selected) style = "border-[#e94560] bg-[#e94560]/10";
+              } else if (selected) {
+                style = "border-white/40 bg-white/5";
+              }
+              return (
+                <button
+                  key={oi}
+                  onClick={() => selectAnswer(qi, oi)}
+                  disabled={submitted}
+                  className={`text-left rounded-xl px-3 py-2 text-sm border transition-all flex items-center justify-between gap-2 ${style}`}
+                >
+                  <span>{opt}</span>
+                  {submitted && isCorrect && <Check className="size-4 text-[#52b04a] shrink-0" />}
+                  {submitted && selected && !isCorrect && (
+                    <X className="size-4 text-[#e94560] shrink-0" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      <div className="flex items-center gap-3">
+        {!submitted ? (
+          <button
+            onClick={() => setSubmitted(true)}
+            disabled={!allAnswered}
+            className="liquid-tab px-5 py-2.5 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Valider le quiz
+          </button>
+        ) : (
+          <span className="font-display font-bold text-lg text-[var(--ember-glow)]">
+            Score : {score}/{quiz.length}
+          </span>
+        )}
+        {submitted && (
+          <button onClick={restart} className="text-xs text-white/60 hover:text-white">
+            Recommencer
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1833,13 +2521,13 @@ function ProfileIntro({
         }}
       >
         <img
-          src={foxAdvisor}
+          src={PROFILE_IMAGE[detected]}
           alt=""
           className="size-24 object-contain mx-auto mb-4 animate-float"
         />
         <div className="text-[10px] uppercase tracking-[0.2em] text-white/60">Profil détecté</div>
-        <h1 className="font-display text-3xl sm:text-4xl font-bold mt-2" style={{ color }}>
-          « {PROFILE_LABEL[detected]} »
+        <h1 className="font-display text-xl sm:text-2xl font-semibold mt-2 text-white">
+          {PROFILE_LABEL[detected]}
         </h1>
         <p className="text-sm text-white/70 mt-3 max-w-md mx-auto">
           D'après ton relevé, le Renard a identifié ton style de gestion. On affine maintenant ta
@@ -1940,9 +2628,12 @@ function CompteTab({
         <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-widest text-white/60">
           <User className="size-3.5" /> Mon profil
         </div>
-        <h2 className="font-display text-3xl font-bold mt-1" style={{ color }}>
-          « {PROFILE_LABEL[detected]} »
-        </h2>
+        <div className="flex items-center gap-3 mt-2">
+          <img src={PROFILE_IMAGE[detected]} alt="" className="size-24 object-contain" />
+          <h2 className="font-display text-lg font-semibold text-white">
+            {PROFILE_LABEL[detected]}
+          </h2>
+        </div>
         <p className="text-sm text-white/70 mt-2">
           Détecté à partir de tes relevés : tu mets de côté{" "}
           <span className="font-mono font-bold text-white">{ratio}%</span> de tes revenus en
