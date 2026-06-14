@@ -563,6 +563,13 @@ function splitSavingsFilled(
   return { short, long };
 }
 
+// Montant "épargné" affiché à l'utilisateur : seules les parts effectivement allouées aux
+// objectifs court/long terme comptent (le "disponible" non affecté n'en fait pas partie).
+function epargneAffichee(saved: number, shortTarget: number, longTarget: number): number {
+  const split = splitSavingsFilled(saved, shortTarget, longTarget);
+  return split.short + split.long;
+}
+
 // L'objectif épinglé est mis en avant (carte, transferts automatiques) ; à défaut, le premier de la liste.
 function pinnedOrFirst(goals: SavingsGoal[]): SavingsGoal | null {
   return goals.find((g) => g.pinned) ?? goals[0] ?? null;
@@ -1669,9 +1676,6 @@ function BudgetPie({
     { target: longTarget, filled: split.long },
     availableSlice(data.currentMonthSaved, split),
   );
-  const totalBudget = slices.reduce((s, x) => s + x.total, 0);
-  const totalConsumed = slices.reduce((s, x) => s + Math.min(x.total, x.filled), 0);
-
   return (
     <section className="glass-strong rounded-3xl p-6">
       <div className="flex items-baseline justify-between mb-4 gap-3 flex-wrap">
@@ -1682,20 +1686,7 @@ function BudgetPie({
         </p>
       </div>
       <div className="grid sm:grid-cols-[auto_1fr] gap-6 items-center justify-items-center sm:justify-items-start">
-        <Donut
-          slices={slices}
-          center={
-            <>
-              <div className="text-[10px] uppercase tracking-widest text-white/50">Consommé</div>
-              <div className="font-display font-bold text-xl">
-                {totalBudget > 0 ? Math.round((totalConsumed / totalBudget) * 100) : 0}%
-              </div>
-              <div className="text-[10px] text-white/40 mt-0.5">
-                {Math.round(totalConsumed)}/{Math.round(totalBudget)}€
-              </div>
-            </>
-          }
-        />
+        <Donut slices={slices} />
         <ul className="space-y-2 text-sm w-full sm:min-w-[220px]">
           {slices.map((s) => {
             const pct = s.total > 0 ? Math.round((s.filled / s.total) * 100) : 0;
@@ -2187,10 +2178,15 @@ function StatsTab({
   shortGoals: SavingsGoal[];
   longGoals: SavingsGoal[];
 }) {
+  const shortTarget = monthlySavingsTarget(shortGoals);
+  const longTarget = monthlySavingsTarget(longGoals);
   const months = [...data.months].reverse(); // plus récent en haut
-  const maxSaved = Math.max(1, ...months.map((m) => m.saved));
-  const totalSaved = months.reduce((s, m) => s + m.saved, 0);
-  const last10 = data.months.slice(-10); // chronologique pour la courbe
+  const maxSaved = Math.max(1, ...months.map((m) => epargneAffichee(m.saved, shortTarget, longTarget)));
+  const totalSaved = months.reduce((s, m) => s + epargneAffichee(m.saved, shortTarget, longTarget), 0);
+  // chronologique pour la courbe, montant aligné sur celui affiché sous chaque mois
+  const last10 = data.months
+    .slice(-10)
+    .map((m) => ({ ...m, saved: epargneAffichee(m.saved, shortTarget, longTarget) }));
 
   return (
     <>
@@ -2320,7 +2316,6 @@ function MonthStatRow({
   longGoals: SavingsGoal[];
 }) {
   const [open, setOpen] = useState(false);
-  const pct = Math.max(0, (m.saved / maxSaved) * 100);
 
   // Pour le camembert : zones prédéfinies = baseline globale (référence), consommé = cats du mois
   // + zones épargne court/long avec leur cible mensuelle et "filled" = épargné ce mois-là
@@ -2331,6 +2326,7 @@ function MonthStatRow({
   const shortTarget = monthlySavingsTarget(shortGoals);
   const longTarget = monthlySavingsTarget(longGoals);
   const split = splitSavingsFilled(m.saved, shortTarget, longTarget);
+  const pct = Math.max(0, ((split.short + split.long) / maxSaved) * 100);
   const slices = buildSlices(
     reference,
     m.cats,
