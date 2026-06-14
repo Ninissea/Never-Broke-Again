@@ -158,11 +158,14 @@ def generate_fixed_charges(items: list[RecurringItem], months: int) -> dict:
         "récurrentes pour un montant quasi identique chaque mois.\n"
         "Exclu les commerces simplement visités souvent (courses, restaurants, transports) "
         "qui ne sont pas des charges fixes.\n"
+        "N'oublie aucune charge fixe mensuelle de la liste, y compris le loyer s'il y en a un.\n"
         "Pour chaque charge fixe retenue, garde le libellé EXACTEMENT comme fourni en entrée "
         "et indique son montant moyen.\n\n"
-        "Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou "
-        "après, sans raisonnement, sans bloc de code markdown.\n\n"
-        "{format_instructions}"
+        "Réponds UNIQUEMENT avec un objet JSON de cette forme exacte, sans aucun texte "
+        "avant ou après, sans raisonnement, sans bloc de code markdown "
+        "(une entrée par charge fixe retenue, liste vide si aucune) :\n"
+        '{{"charges": [{{"libelle": "EXEMPLE LOYER", "montant": 500.0}}, '
+        '{{"libelle": "EXEMPLE ABONNEMENT", "montant": 10.0}}]}}'
     )
     inputs = {
         "items": json.dumps([i.model_dump() for i in items], ensure_ascii=False),
@@ -229,10 +232,9 @@ OLLAMA_MODEL = "llama3.2:3b"
 # Garde le modèle chargé en mémoire entre deux requêtes : sur CPU, le rechargement
 # du modèle est souvent le principal poste de latence.
 OLLAMA_KEEP_ALIVE = "30m"
-# Les réponses (titre/message/montant) sont courtes, mais le JSON inclut aussi les clés/
-# structure du schéma : une valeur trop basse tronque le JSON avant la fin (réponse
-# imparfaite -> fallback générique, donc coût LLM payé pour rien). 400 laisse de la marge.
-OLLAMA_NUM_PREDICT = 400
+# Les réponses attendues sont de courts objets JSON (titre/message/montant/...) :
+# pas besoin de laisser le LLM générer beaucoup plus.
+OLLAMA_NUM_PREDICT = 200
 
 # Cache mémoire des réponses LLM : avec temperature=0 et seed fixe, une même entrée
 # produit toujours la même sortie, donc pas besoin de re-solliciter le modèle.
@@ -253,26 +255,37 @@ def _make_llm():
     )
 
 
+def _extract_json(content: str) -> dict:
+    """Isole le premier objet JSON `{...}` de la réponse du LLM (qui peut être
+    entouré de texte ou de blocs markdown malgré la consigne)."""
+    start = content.find("{")
+    end = content.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("Aucun objet JSON trouvé dans la réponse du LLM")
+    return json.loads(content[start : end + 1])
+
+
 def _invoke_insight_chain(pydantic_model: type[BaseModel], template: str, input_variables: list[str], inputs: dict, fallback: dict) -> dict:
-    """Construit et exécute une chaîne LangChain -> Ollama -> parser, avec anti-crash."""
+    """Construit et exécute une chaîne LangChain -> Ollama -> parsing JSON, avec anti-crash.
+
+    Le template doit déjà contenir un exemple concret du JSON attendu : les modèles
+    locaux de petite taille (llama3.2:3b) suivent un exemple bien mieux qu'une
+    description de schéma JSON (PydanticOutputParser), qu'ils ont tendance à
+    recopier littéralement au lieu de la remplir."""
     cache_key = json.dumps({"t": template, "i": inputs}, sort_keys=True, ensure_ascii=False)
     if cache_key in _LLM_CACHE:
         return _LLM_CACHE[cache_key]
 
     try:
-        from langchain_core.output_parsers import PydanticOutputParser
         from langchain_core.prompts import PromptTemplate
 
-        parser = PydanticOutputParser(pydantic_object=pydantic_model)
-        prompt = PromptTemplate(
-            template=template,
-            input_variables=input_variables,
-            partial_variables={"format_instructions": parser.get_format_instructions()},
-        )
-        chain = prompt | _make_llm() | parser
+        prompt = PromptTemplate(template=template, input_variables=input_variables)
+        chain = prompt | _make_llm()
 
-        result = chain.invoke(inputs)
-        data = result.model_dump()
+        raw = chain.invoke(inputs)
+        parsed = _extract_json(raw.content)
+        validated = pydantic_model(**parsed)
+        data = validated.model_dump()
         if "titre" in data:
             data["titre"] = html.unescape(data["titre"])
         if "message" in data:
@@ -293,9 +306,12 @@ def generate_insight(budget: list[dict], pots_data: dict, transactions: list[dic
         "du pot 'Cotisation WEI 2026' (id potCible: epargne_longue), en débitant le "
         "pot courant (id potSource: courant), SANS toucher aux dépenses vitales "
         "(Loyer, Nourriture, Transport).\n\n"
-        "Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou "
-        "après, sans raisonnement, sans bloc de code markdown.\n\n"
-        "{format_instructions}"
+        "Réponds UNIQUEMENT avec un objet JSON de cette forme exacte, sans aucun texte "
+        "avant ou après, sans raisonnement, sans bloc de code markdown "
+        "(remplace les valeurs par ton conseil) :\n"
+        '{{"titre": "Sécurise ton WEI", "message": "Transfère 15€ vers ton pot Cotisation '
+        'WEI 2026 pour avancer sans toucher au budget vital.", "montant": 15, '
+        '"potSource": "courant", "potCible": "epargne_longue"}}'
     )
     inputs = {
         "budget": json.dumps(budget, ensure_ascii=False),
@@ -333,9 +349,12 @@ def generate_live_insight(balance: float, transactions: list[TransactionIn], pot
         "chuter fortement), NE PROPOSE AUCUN transfert : mets montant à 0, et donne plutôt un "
         "conseil pour freiner les dépenses non essentielles (ex: fast-food, sorties) afin de "
         "reconstituer le solde, sur un ton bienveillant et sans culpabiliser.\n\n"
-        "Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou "
-        "après, sans raisonnement, sans bloc de code markdown.\n\n"
-        "{format_instructions}"
+        "Réponds UNIQUEMENT avec un objet JSON de cette forme exacte, sans aucun texte "
+        "avant ou après, sans raisonnement, sans bloc de code markdown "
+        "(remplace les valeurs par ton conseil) :\n"
+        '{{"titre": "Petit écart, grande discipline", "message": "Transfère 10€ vers ton '
+        'pot {pot_cible} pour rester sur la trajectoire.", "montant": 10, '
+        '"potCible": "{pot_cible}"}}'
     )
     inputs = {
         "balance": balance,
